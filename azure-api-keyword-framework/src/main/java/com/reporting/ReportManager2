@@ -1,0 +1,358 @@
+package reporting;
+
+import com.aventstack.extentreports.ExtentReports;
+import com.aventstack.extentreports.ExtentTest;
+import com.aventstack.extentreports.Status;
+import com.aventstack.extentreports.markuputils.Markup;
+import com.aventstack.extentreports.markuputils.MarkupHelper;
+import com.aventstack.extentreports.reporter.ExtentSparkReporter;
+import com.aventstack.extentreports.reporter.configuration.Theme;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.File;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+
+/**
+ * Central Extent Report manager.
+ *
+ * Features:
+ *  - Single ExtentReports instance for the whole run
+ *  - Thread-safe test & step nodes via ThreadLocal
+ *  - Helper APIs for:
+ *      * Initializing report
+ *      * Creating test cases & test steps (child nodes)
+ *      * Logging assertion results in a formatted table
+ *      * Logging code blocks with caption
+ *      * Simple PASS/FAIL/INFO/WARN logging
+ */
+public final class ReportManager {
+
+    private static final Logger logger = LoggerFactory.getLogger(ReportManager.class);
+
+    // Single ExtentReports instance for the whole framework
+    private static ExtentReports extent;
+
+    // Per-thread current test and current step
+    private static final ThreadLocal<ExtentTest> currentTest = new ThreadLocal<>();
+    private static final ThreadLocal<ExtentTest> currentStep = new ThreadLocal<>();
+
+    // Prevent instantiation
+    private ReportManager() { }
+
+    // ==========================
+    // 1. REPORT INITIALIZATION
+    // ==========================
+
+    /**
+     * Initialize Extent report.
+     *
+     * @param reportName   Logical report name (shown in UI & used in file name).
+     * @param suiteName    Test suite name (stored as system info).
+     * @param reportDir    Directory where the report will be written.
+     */
+    public static synchronized void initReport(String reportName,
+                                               String suiteName,
+                                               String reportDir) {
+
+        if (extent != null) {
+            logger.info("ExtentReports already initialized. Skipping re-initialization.");
+            return;
+        }
+
+        if (reportDir == null || reportDir.trim().isEmpty()) {
+            reportDir = "reports";
+        }
+
+        String safeReportName = (reportName == null || reportName.trim().isEmpty())
+                ? "Automation_Report"
+                : reportName.trim().replaceAll("\\s+", "_");
+
+        String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+        String filePath = reportDir + File.separator + safeReportName + "_" + timestamp + ".html";
+
+        File directory = new File(reportDir);
+        if (!directory.exists() && !directory.mkdirs()) {
+            logger.warn("Could not create report directory: {}", reportDir);
+        }
+
+        ExtentSparkReporter sparkReporter = new ExtentSparkReporter(filePath);
+        sparkReporter.config().setDocumentTitle(reportName);
+        sparkReporter.config().setReportName(reportName);
+        sparkReporter.config().setTheme(Theme.STANDARD);
+
+        extent = new ExtentReports();
+        extent.attachReporter(sparkReporter);
+
+        if (suiteName != null && !suiteName.trim().isEmpty()) {
+            extent.setSystemInfo("Test Suite", suiteName);
+        }
+
+        logger.info("ExtentReports initialized. Report will be saved at: {}", filePath);
+    }
+
+    public static ExtentReports getExtent() {
+        return extent;
+    }
+
+    // ==========================
+    // 2. TEST CASE & STEP NODES
+    // ==========================
+
+    /**
+     * Creates a test case node for the current thread.
+     *
+     * @param testName        Test case name.
+     * @param testDescription Test case description / detail.
+     */
+    public static void createTestCase(String testName, String testDescription) {
+        if (extent == null) {
+            throw new IllegalStateException("Extent is not initialized. Call initReport() first.");
+        }
+
+        ExtentTest test = extent.createTest(testName, testDescription);
+        currentTest.set(test);
+        currentStep.remove();
+
+        logger.debug("Created test case: {}", testName);
+    }
+
+    /**
+     * Creates a test step node under the current test case.
+     * Each call will update the currentStep for the thread.
+     *
+     * @param stepName        Step name.
+     * @param stepDescription Step description.
+     */
+    public static void createTestStep(String stepName, String stepDescription) {
+        ExtentTest test = currentTest.get();
+        if (test == null) {
+            logger.warn("createTestStep called but no current test is set. Ignoring.");
+            return;
+        }
+
+        ExtentTest step = test.createNode(stepName, stepDescription);
+        currentStep.set(step);
+
+        logger.debug("Created test step: {} under test: {}", stepName, test.getModel().getName());
+    }
+
+    /**
+     * Clear current test & step from ThreadLocal (optional, good practice for @AfterMethod).
+     */
+    public static void clearCurrentTest() {
+        currentStep.remove();
+        currentTest.remove();
+    }
+
+    // ==========================
+    // 3. ASSERTION LOGGING
+    // ==========================
+
+    /**
+     * Logs an assertion result in a formatted table using assertion name, data, and result.
+     *
+     * @param assertionName   Name/description of assertion.
+     * @param assertionData   Details of what was asserted (JSON, SQL, field path, etc.).
+     * @param assertionResult Result string ("PASS", "FAIL", "SKIP", etc.).
+     */
+    public static void logAssertion(String assertionName,
+                                    String assertionData,
+                                    String assertionResult) {
+
+        ExtentTest node = getActiveNode();
+        if (node == null) {
+            logger.warn("logAssertion called but no active test/step is set.");
+            return;
+        }
+
+        String finalResult = assertionResult == null ? "" : assertionResult.trim();
+        Status status = mapToStatus(finalResult);
+
+        String[][] table = new String[][]{
+                {"Field", "Value"},
+                {"Assertion Name", nullSafe(assertionName)},
+                {"Assertion Data", nullSafe(assertionData)},
+                {"Result", nullSafe(finalResult)}
+        };
+
+        Markup tableMarkup = MarkupHelper.createTable(table);
+        node.log(status, tableMarkup);
+    }
+
+    /**
+     * Convenience overload using boolean result.
+     *
+     * @param assertionName Name/description.
+     * @param assertionData Details of what was asserted.
+     * @param passed        true => PASS, false => FAIL.
+     */
+    public static void logAssertion(String assertionName,
+                                    String assertionData,
+                                    boolean passed) {
+
+        String result = passed ? "PASS" : "FAIL";
+        logAssertion(assertionName, assertionData, result);
+    }
+
+    // ==========================
+    // 4. CODE BLOCK + CAPTION
+    // ==========================
+
+    /**
+     * Logs a code block (JSON, XML, SQL, cURL, etc.) into the active test node.
+     * Can be called inside a test case or a step.
+     *
+     * @param caption Caption/title for the code block (optional).
+     * @param code    The actual code/text to render in a code block.
+     */
+    public static void logCodeBlock(String caption, String code) {
+        ExtentTest node = getActiveNode();
+        if (node == null) {
+            logger.warn("logCodeBlock called but no active test/step is set.");
+            return;
+        }
+
+        if (caption != null && !caption.trim().isEmpty()) {
+            node.info("<b>" + escapeHtml(caption.trim()) + "</b>");
+        }
+
+        if (code == null) {
+            code = "";
+        }
+
+        node.info(MarkupHelper.createCodeBlock(code));
+    }
+
+    /**
+     * Simple caption helper – if you only want to print a caption/heading.
+     *
+     * @param caption Caption text.
+     */
+    public static void caption(String caption) {
+        ExtentTest node = getActiveNode();
+        if (node == null) {
+            logger.warn("caption called but no active test/step is set.");
+            return;
+        }
+        if (caption != null && !caption.trim().isEmpty()) {
+            node.info("<b>" + escapeHtml(caption.trim()) + "</b>");
+        }
+    }
+
+    // ==========================
+    // 5. BASIC LOGGING HELPERS
+    // ==========================
+
+    public static void logPass(String message) {
+        ExtentTest node = getActiveNode();
+        if (node != null) {
+            node.pass(nullSafe(message));
+        }
+    }
+
+    public static void logFail(String message) {
+        ExtentTest node = getActiveNode();
+        if (node != null) {
+            node.fail(nullSafe(message));
+        }
+    }
+
+    public static void logInfo(String message) {
+        ExtentTest node = getActiveNode();
+        if (node != null) {
+            node.info(nullSafe(message));
+        }
+    }
+
+    public static void logWarning(String message) {
+        ExtentTest node = getActiveNode();
+        if (node != null) {
+            node.warning(nullSafe(message));
+        }
+    }
+
+    /**
+     * Helper to set overall test status at the end.
+     */
+    public static void setTestStatus(boolean passed) {
+        ExtentTest test = currentTest.get();
+        if (test == null) {
+            logger.warn("setTestStatus called but no current test is set.");
+            return;
+        }
+
+        if (passed) {
+            test.pass("Test PASSED");
+        } else {
+            test.fail("Test FAILED");
+        }
+    }
+
+    // ==========================
+    // 6. FLUSH
+    // ==========================
+
+    public static synchronized void flushReports() {
+        if (extent != null) {
+            extent.flush();
+            logger.info("ExtentReports flushed successfully.");
+        }
+    }
+
+    // ==========================
+    // INTERNAL HELPERS
+    // ==========================
+
+    /**
+     * Returns the most specific active node:
+     *  - If step is available -> use step
+     *  - Else use test
+     */
+    private static ExtentTest getActiveNode() {
+        ExtentTest step = currentStep.get();
+        if (step != null) {
+            return step;
+        }
+        return currentTest.get();
+    }
+
+    private static String nullSafe(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static Status mapToStatus(String result) {
+        if (result == null) {
+            return Status.INFO;
+        }
+        String r = result.trim().toUpperCase();
+        switch (r) {
+            case "PASS":
+            case "PASSED":
+                return Status.PASS;
+            case "FAIL":
+            case "FAILED":
+                return Status.FAIL;
+            case "SKIP":
+            case "SKIPPED":
+                return Status.SKIP;
+            case "WARNING":
+            case "WARN":
+                return Status.WARNING;
+            default:
+                return Status.INFO;
+        }
+    }
+
+    /**
+     * Very small HTML escape just to avoid breaking tags in captions.
+     */
+    private static String escapeHtml(String input) {
+        if (input == null) return "";
+        return input
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;");
+    }
+}
