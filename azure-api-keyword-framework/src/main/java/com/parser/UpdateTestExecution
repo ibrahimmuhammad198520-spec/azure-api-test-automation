@@ -1,0 +1,332 @@
+// Domain status for steps/testcase
+public enum StepStatus {
+    NOT_RUN,
+    PASSED,
+    FAILED
+}
+
+// One executed step in ONE iteration
+public class StepReport {
+    public int stepIndex;          // e.g. 0, 2, 3  (matches actionId)
+    public String stepPath;        // e.g. "00000002" (matches actionPath)
+    public String indexString;     // e.g. "1.1", "2.1" (what UI shows)
+    public int iterationId;        // 1, 2, 3... (matches iterationId in payload)
+
+    public StepStatus status = StepStatus.NOT_RUN;
+    public String errorMessage = "";
+    public String comment = "";
+
+    public long startTimeMillis;   // System.currentTimeMillis()
+    public long endTimeMillis;     // System.currentTimeMillis()
+
+    public long getDurationMillis() {
+        return Math.max(0, endTimeMillis - startTimeMillis);
+    }
+}
+
+// All steps for a given iteration of a test case
+public class IterationReport {
+    public int iterationId;
+    public java.util.List<StepReport> steps = new java.util.ArrayList<>();
+}
+
+// Whole test case execution
+public class ExecutionReport {
+    public String testCaseId;
+    public String title;
+
+    public long startTimeMillis;
+    public long endTimeMillis;
+
+    public java.util.List<IterationReport> iterations = new java.util.ArrayList<>();
+
+    // Aggregate status from all steps of all iterations
+    public StepStatus getOverallStatus() {
+        boolean anyPassed = false;
+        for (IterationReport it : iterations) {
+            for (StepReport s : it.steps) {
+                if (s.status == StepStatus.FAILED) {
+                    return StepStatus.FAILED;
+                }
+                if (s.status == StepStatus.PASSED) {
+                    anyPassed = true;
+                }
+            }
+        }
+        return anyPassed ? StepStatus.PASSED : StepStatus.NOT_RUN;
+    }
+
+    // First error message (if any), good for testCaseResult.errorMessage
+    public String getFirstErrorMessage() {
+        for (IterationReport it : iterations) {
+            for (StepReport s : it.steps) {
+                if (s.status == StepStatus.FAILED && s.errorMessage != null && !s.errorMessage.isEmpty()) {
+                    return s.errorMessage;
+                }
+            }
+        }
+        return "";
+    }
+}
+
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import static com.fasterxml.jackson.annotation.JsonInclude.Include;
+
+public class AzureResultPayloadBuilder {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    // ---- PUBLIC ENTRY POINT ----
+
+    /**
+     * Build the JSON body for POST /_api/_testresult/Update
+     *
+     * @param report            populated execution report for this testcase
+     * @param testRunId         Azure test run id
+     * @param testResultId      Azure test result id
+     * @param testCaseId        Azure test case id (work item id)
+     * @param testPointId       Azure test point id
+     * @param configurationId   Azure configuration id
+     * @param configurationName e.g. "Windows 10"
+     * @param planId            Azure test plan id
+     * @param ownerId           guid of owner (same as in UI)
+     * @param runById           guid of runBy
+     * @return JSON string body to send in the HTTP request
+     */
+    public static String buildPayload(ExecutionReport report,
+                                      long testRunId,
+                                      long testResultId,
+                                      long testCaseId,
+                                      long testPointId,
+                                      long configurationId,
+                                      String configurationName,
+                                      long planId,
+                                      String ownerId,
+                                      String runById) throws JsonProcessingException {
+
+        AzureTestResultUpdateRequest req = new AzureTestResultUpdateRequest();
+        req.testRunId = testRunId;
+        req.testResultId = testResultId;
+
+        req.testCaseResult = buildTestCaseResult(
+                report, testRunId, testResultId,
+                testCaseId, testPointId,
+                configurationId, configurationName,
+                planId, ownerId, runById
+        );
+
+        req.actionResults = buildActionResults(report, testRunId, testResultId);
+        req.actionResultDeletes = java.util.Collections.emptyList();
+        req.parameters = java.util.Collections.emptyList();
+        req.parameterDeletes = java.util.Collections.emptyList();
+
+        java.util.List<AzureTestResultUpdateRequest> list = java.util.Collections.singletonList(req);
+        String updateRequestsJson = MAPPER.writeValueAsString(list);
+
+        AzureUpdateEnvelope envelope = new AzureUpdateEnvelope();
+        envelope.updateRequests = updateRequestsJson;
+
+        return MAPPER.writeValueAsString(envelope);
+    }
+
+    // ---- INTERNAL: build testCaseResult ----
+
+    private static AzureTestCaseResult buildTestCaseResult(ExecutionReport report,
+                                                           long testRunId,
+                                                           long testResultId,
+                                                           long testCaseId,
+                                                           long testPointId,
+                                                           long configurationId,
+                                                           String configurationName,
+                                                           long planId,
+                                                           String ownerId,
+                                                           String runById) {
+        AzureTestCaseResult tc = new AzureTestCaseResult();
+
+        tc.outcome = toAzureOutcome(report.getOverallStatus());
+        tc.errorMessage = report.getFirstErrorMessage();
+        tc.comment = "";
+
+        tc.dateStarted = toAzureDate(report.startTimeMillis);
+        tc.dateCompleted = toAzureDate(report.endTimeMillis);
+        tc.duration = Math.max(0, report.endTimeMillis - report.startTimeMillis);
+
+        tc.id = new AzureResultId();
+        tc.id.testRunId = testRunId;
+        tc.id.testResultId = testResultId;
+
+        tc.testCaseId = testCaseId;
+        tc.configurationId = configurationId;
+        tc.configurationName = configurationName;
+        tc.testPointId = testPointId;
+
+        tc.revision = 0;
+        tc.state = 3; // completed; adjust if needed
+        tc.owner = ownerId;
+        tc.runBy = runById;
+
+        tc.testCaseTitle = report.title;
+        tc.testCaseArea = "";
+        tc.dataRowCount = report.iterations.size();
+        tc.testCaseRevision = 1; // adjust if you track it
+        tc.priority = 2;         // adjust if you track it
+        tc.planId = planId;
+
+        // We are intentionally NOT sending _events; API usually doesn't require it.
+        return tc;
+    }
+
+    // ---- INTERNAL: build actionResults from steps/iterations ----
+
+    private static java.util.List<AzureActionResult> buildActionResults(ExecutionReport report,
+                                                                        long testRunId,
+                                                                        long testResultId) {
+        java.util.List<AzureActionResult> list = new java.util.ArrayList<>();
+
+        for (IterationReport iteration : report.iterations) {
+            for (StepReport step : iteration.steps) {
+                AzureActionResult ar = new AzureActionResult();
+                ar.outcome = toAzureOutcome(step.status);
+                ar.errorMessage = step.errorMessage;
+                ar.comment = step.comment != null ? step.comment : "";
+
+                ar.dateStarted = toAzureDate(step.startTimeMillis);
+                ar.dateCompleted = toAzureDate(step.endTimeMillis);
+                ar.duration = step.getDurationMillis();
+
+                ar.actionId = step.stepIndex;
+                ar.actionPath = step.stepPath != null
+                        ? step.stepPath
+                        : String.format("%08d", step.stepIndex);
+
+                ar.parent = null;
+                ar.isSubStep = false;
+                ar.indexString = step.indexString != null ? step.indexString : "";
+
+                AzureResultId id = new AzureResultId();
+                id.testRunId = testRunId;
+                id.testResultId = testResultId;
+                ar.id = id;
+
+                ar.iterationId = iteration.iterationId;
+                ar.revision = 0;
+                ar.actionLogTimeStamp = toAzureDate(step.endTimeMillis);
+
+                list.add(ar);
+            }
+        }
+
+        return list;
+    }
+
+    // ---- Helpers ----
+
+    /**
+     * Map our StepStatus to the int Azure uses internally.
+     * You can tweak these values to match what you see in DevTools.
+     *
+     * Common mapping:
+     * 0 = NotExecuted/Unspecified
+     * 2 = Passed
+     * 3 = Failed
+     */
+    private static int toAzureOutcome(StepStatus status) {
+        if (status == null) return 0;
+        switch (status) {
+            case PASSED:
+                return 2;
+            case FAILED:
+                return 3;
+            case NOT_RUN:
+            default:
+                return 0;
+        }
+    }
+
+    private static String toAzureDate(long epochMillis) {
+        return "/Date(" + epochMillis + ")/";
+    }
+
+    // ---- DTOs that mirror the Azure payload ----
+
+    @JsonInclude(Include.NON_NULL)
+    public static class AzureUpdateEnvelope {
+        public String updateRequests;
+    }
+
+    @JsonInclude(Include.NON_NULL)
+    public static class AzureTestResultUpdateRequest {
+        public long testResultId;
+        public long testRunId;
+        public AzureTestCaseResult testCaseResult;
+        public java.util.List<AzureActionResult> actionResults;
+        public java.util.List<Object> actionResultDeletes;
+        public java.util.List<Object> parameters;
+        public java.util.List<Object> parameterDeletes;
+    }
+
+    @JsonInclude(Include.NON_NULL)
+    public static class AzureTestCaseResult {
+        public int outcome;
+        public String errorMessage;
+        public String comment;
+
+        public String dateStarted;
+        public String dateCompleted;
+        public long duration;
+
+        public AzureResultId id;
+
+        public long testCaseId;
+        public long configurationId;
+        public String configurationName;
+        public long testPointId;
+
+        public int revision;
+        public int state;
+        public String owner;
+        public String runBy;
+
+        public String testCaseTitle;
+        public String testCaseArea;
+        public int dataRowCount;
+        public int testCaseRevision;
+        public int priority;
+        public long planId;
+    }
+
+    @JsonInclude(Include.NON_NULL)
+    public static class AzureActionResult {
+        public int outcome;
+        public String errorMessage;
+        public String comment;
+
+        public String dateStarted;
+        public String dateCompleted;
+        public long duration;
+
+        public int actionId;
+        public String actionPath;
+        public Object parent;
+        public boolean isSubStep;
+        public String indexString;
+
+        public AzureResultId id;
+        public int iterationId;
+        public int revision;
+        public String actionLogTimeStamp;
+    }
+
+    @JsonInclude(Include.NON_NULL)
+    public static class AzureResultId {
+        public long testRunId;
+        public long testResultId;
+    }
+}
+
+
+
