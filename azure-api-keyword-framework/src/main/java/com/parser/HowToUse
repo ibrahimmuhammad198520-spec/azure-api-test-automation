@@ -1,0 +1,68 @@
+C. How you plug this into your existing framework
+
+1. During test execution
+
+When you start a test case:
+
+ExecutionReport report = new ExecutionReport();
+report.testCaseId = "2089";
+report.title = "Sample Test case azure devops calls";
+report.startTimeMillis = System.currentTimeMillis();
+
+
+For each data iteration:
+
+int iterationNumber = 1;
+IterationReport it = new IterationReport();
+it.iterationId = iterationNumber;
+report.iterations.add(it);
+
+
+For each test step in that iteration:
+
+StepReport step = new StepReport();
+step.stepIndex = 2;                 // should match your Azure actionId
+step.stepPath = "00000002";         // same pattern DevOps uses
+step.indexString = "1.1";           // for display
+step.iterationId = iterationNumber;
+
+step.startTimeMillis = System.currentTimeMillis();
+
+// ... execute step actions & assertions ...
+
+step.status = StepStatus.PASSED;    // or FAILED / NOT_RUN
+step.errorMessage = "";             // or assertion message if FAILED
+step.endTimeMillis = System.currentTimeMillis();
+
+it.steps.add(step);
+
+
+When the whole test case finishes:
+
+report.endTimeMillis = System.currentTimeMillis();
+
+
+2. Right before calling _testresult/Update
+
+long testRunId = 242L;
+long testResultId = 100000L;
+long testCaseId = 2089L;
+long testPointId = 87L;
+long configurationId = 43L;
+String configurationName = "Windows 10";
+long planId = 2008L;
+String ownerId = "30bc7df2-5a0d-4ef8-951d-8079ce88da5a";
+String runById = ownerId;
+
+String bodyJson = AzureResultPayloadBuilder.buildPayload(
+        report,
+        testRunId,
+        testResultId,
+        testCaseId,
+        testPointId,
+        configurationId,
+        configurationName,
+        planId,
+        ownerId,
+        runById
+);
