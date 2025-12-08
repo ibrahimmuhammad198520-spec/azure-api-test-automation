@@ -1,0 +1,367 @@
+public enum StepStatus {
+    NOT_RUN,
+    PASSED,
+    FAILED
+}
+
+public class StepReport {
+    // Azure-ish identifiers
+    public int stepIndex;          // becomes actionId (0,2,3…)
+    public String actionPath;      // e.g. "00000002" or ""
+    public String indexString;     // e.g. "1.", "2.", ""
+
+    // Iteration this step belongs to
+    public int iterationId;        // 1, 2, ...
+
+    // Status / messages
+    public StepStatus status = StepStatus.NOT_RUN;
+    public String errorMessage = "";
+    public String comment = "";
+
+    // Timings in epoch millis
+    public long startTimeMillis;
+    public long endTimeMillis;
+
+    public long getDurationMillis() {
+        return Math.max(0, endTimeMillis - startTimeMillis);
+    }
+}
+
+public class IterationReport {
+    public int iterationId;
+    public java.util.List<StepReport> steps = new java.util.ArrayList<>();
+}
+
+public class ExecutionReport {
+    // Logical test info
+    public String testCaseTitle;
+
+    // optional, if you want to keep them here as well
+    public long startTimeMillis;
+    public long endTimeMillis;
+
+    public java.util.List<IterationReport> iterations = new java.util.ArrayList<>();
+
+    // Whole-test aggregated status
+    public StepStatus getOverallStatus() {
+        boolean anyPassed = false;
+        for (IterationReport it : iterations) {
+            for (StepReport s : it.steps) {
+                if (s.status == StepStatus.FAILED) {
+                    return StepStatus.FAILED;
+                }
+                if (s.status == StepStatus.PASSED) {
+                    anyPassed = true;
+                }
+            }
+        }
+        return anyPassed ? StepStatus.PASSED : StepStatus.NOT_RUN;
+    }
+
+    public String getFirstErrorMessage() {
+        for (IterationReport it : iterations) {
+            for (StepReport s : it.steps) {
+                if (s.status == StepStatus.FAILED &&
+                    s.errorMessage != null &&
+                    !s.errorMessage.isEmpty()) {
+                    return s.errorMessage;
+                }
+            }
+        }
+        return "";
+    }
+}
+=====================================
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+public class AzureIterationPayloadBuilder {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    static {
+        // Important: include nulls & empties, as requested
+        MAPPER.setSerializationInclusion(JsonInclude.Include.ALWAYS);
+    }
+
+    // ===== PUBLIC ENTRY POINT =====
+
+    /**
+     * Build payload for ONE iteration.
+     *
+     * @param report            full test execution report (all iterations)
+     * @param iteration         the specific iteration we are building payload for
+     * @param testRunId         Azure test run id
+     * @param testResultId      Azure test result id
+     * @param testCaseId        Azure test case id (work item)
+     * @param testPointId       Azure test point id
+     * @param configurationId   Azure configuration id
+     * @param configurationName e.g. "Windows 10"
+     * @param planId            Azure test plan id
+     * @param ownerId           guid of owner
+     * @param runById           guid of runBy
+     * @return JSON body string for POST /_api/_testresult/update
+     */
+    public static String buildPayloadForIteration(ExecutionReport report,
+                                                  IterationReport iteration,
+                                                  long testRunId,
+                                                  long testResultId,
+                                                  long testCaseId,
+                                                  long testPointId,
+                                                  long configurationId,
+                                                  String configurationName,
+                                                  long planId,
+                                                  String ownerId,
+                                                  String runById)
+            throws JsonProcessingException {
+
+        AzureTestResultUpdateRequest req = new AzureTestResultUpdateRequest();
+        req.testResultId = testResultId;
+        req.testRunId = testRunId;
+
+        req.testCaseResult = buildTestCaseResult(
+                report, testRunId, testResultId,
+                testCaseId, testPointId,
+                configurationId, configurationName,
+                planId, ownerId, runById
+        );
+
+        req.actionResults = buildActionResultsForIteration(report, iteration, testRunId, testResultId);
+        req.actionResultDeletes = new ArrayList<>(); // keep as empty list
+        req.parameters = new ArrayList<>();
+        req.parameterDeletes = new ArrayList<>();
+
+        AzureUpdateEnvelope envelope = new AzureUpdateEnvelope();
+        envelope.updateRequests = Collections.singletonList(req);
+
+        return MAPPER.writeValueAsString(envelope);
+    }
+
+    // ===== INTERNAL: testCaseResult =====
+
+    private static AzureTestCaseResult buildTestCaseResult(ExecutionReport report,
+                                                           long testRunId,
+                                                           long testResultId,
+                                                           long testCaseId,
+                                                           long testPointId,
+                                                           long configurationId,
+                                                           String configurationName,
+                                                           long planId,
+                                                           String ownerId,
+                                                           String runById) {
+
+        AzureTestCaseResult tc = new AzureTestCaseResult();
+
+        // Overall status based on ALL iterations (can be changed to iteration only if you prefer)
+        StepStatus overall = report.getOverallStatus();
+        tc.outcome = toAzureOutcome(overall);
+
+        String err = report.getFirstErrorMessage();
+        tc.errorMessage = err;
+        tc.comment = err; // your example uses the same value for comment
+
+        tc.dateStarted = toAzureDate(report.startTimeMillis);
+        tc.dateCompleted = toAzureDate(report.endTimeMillis);
+        tc.duration = Math.max(0, report.endTimeMillis - report.startTimeMillis);
+
+        tc.id = new AzureResultId();
+        tc.id.testResultId = testResultId;
+        tc.id.testRunId = testRunId;
+
+        tc.testCaseId = testCaseId;
+        tc.configurationId = configurationId;
+        tc.configurationName = configurationName;
+        tc.testPointId = testPointId;
+
+        tc.revision = 0;
+        tc.state = 3; // completed; adjust if needed
+        tc.owner = ownerId;
+        tc.runBy = runById;
+
+        tc.testCaseTitle = report.testCaseTitle != null ? report.testCaseTitle : "";
+        tc.testCaseArea = "";
+        tc.dataRowCount = report.iterations.size(); // e.g. 2 iterations
+        tc.testCaseRevision = 3; // set from your metadata if needed
+        tc.priority = 2;         // set from your metadata if needed
+        tc.planId = planId;
+
+        // _events with DIRTY-CHANGED -> _handlers [null]
+        tc._events = AzureEvents.createDefault();
+
+        return tc;
+    }
+
+    // ===== INTERNAL: actionResults (only for THIS iteration) =====
+
+    private static List<AzureActionResult> buildActionResultsForIteration(ExecutionReport report,
+                                                                          IterationReport iteration,
+                                                                          long testRunId,
+                                                                          long testResultId) {
+        List<AzureActionResult> list = new ArrayList<>();
+
+        for (StepReport step : iteration.steps) {
+            AzureActionResult ar = new AzureActionResult();
+
+            ar.outcome = toAzureOutcome(step.status);
+            ar.errorMessage = step.errorMessage != null ? step.errorMessage : "";
+            ar.comment = step.comment != null ? step.comment : "";
+
+            ar.dateStarted = toAzureDate(step.startTimeMillis);
+            ar.dateCompleted = toAzureDate(step.endTimeMillis);
+            ar.duration = step.getDurationMillis();
+
+            ar.actionId = step.stepIndex;
+            ar.actionPath = step.actionPath != null ? step.actionPath : "";
+
+            ar.parent = null;
+            ar.isSubStep = false;
+            ar.indexString = step.indexString != null ? step.indexString : "";
+
+            AzureResultId id = new AzureResultId();
+            id.testRunId = testRunId;
+            id.testResultId = testResultId;
+            ar.id = id;
+
+            ar.iterationId = step.iterationId;
+            ar.revision = 0;
+            ar.actionLogTimeStamp = toAzureDate(step.endTimeMillis);
+
+            list.add(ar);
+        }
+
+        return list;
+    }
+
+    // ===== Helpers =====
+
+    /**
+     * Mapping to Azure "outcome" int.
+     * 0 = NotExecuted, 2 = Passed, 3 = Failed (as per your example)
+     */
+    private static int toAzureOutcome(StepStatus status) {
+        if (status == null) return 0;
+        switch (status) {
+            case PASSED:
+                return 2;
+            case FAILED:
+                return 3;
+            case NOT_RUN:
+            default:
+                return 0;
+        }
+    }
+
+    private static String toAzureDate(long epochMillis) {
+        return "/Date(" + epochMillis + ")/";
+    }
+
+    // ===== DTOs matching JSON structure =====
+
+    public static class AzureUpdateEnvelope {
+        public List<AzureTestResultUpdateRequest> updateRequests;
+    }
+
+    public static class AzureTestResultUpdateRequest {
+        public long testResultId;
+        public long testRunId;
+        public AzureTestCaseResult testCaseResult;
+        public List<AzureActionResult> actionResults;
+        public List<Object> actionResultDeletes;
+        public List<Object> parameters;
+        public List<Object> parameterDeletes;
+    }
+
+    public static class AzureTestCaseResult {
+        public int outcome;
+        public String errorMessage;
+        public String comment;
+
+        public String dateStarted;
+        public String dateCompleted;
+        public long duration;
+
+        public AzureResultId id;
+
+        public long testCaseId;
+        public long configurationId;
+        public String configurationName;
+        public long testPointId;
+
+        public int revision;
+        public int state;
+        public String owner;
+        public String runBy;
+
+        public String testCaseTitle;
+        public String testCaseArea;
+        public int dataRowCount;
+        public int testCaseRevision;
+        public int priority;
+        public long planId;
+
+        public AzureEvents _events;
+    }
+
+    public static class AzureActionResult {
+        public int outcome;
+        public String errorMessage;
+        public String comment;
+
+        public String dateStarted;
+        public String dateCompleted;
+        public long duration;
+
+        public int actionId;
+        public String actionPath;
+        public Object parent;
+        public boolean isSubStep;
+        public String indexString;
+
+        public AzureResultId id;
+        public int iterationId;
+        public int revision;
+        public String actionLogTimeStamp;
+    }
+
+    public static class AzureResultId {
+        public long testRunId;
+        public long testResultId;
+    }
+
+    // ---- _events, _namedHandlers, DIRTY-CHANGED ----
+
+    public static class AzureEvents {
+        @JsonProperty("_namedHandlers")
+        public AzureNamedHandlers namedHandlers;
+
+        public static AzureEvents createDefault() {
+            AzureEvents e = new AzureEvents();
+            e.namedHandlers = new AzureNamedHandlers();
+            e.namedHandlers.dirtyChanged = new AzureDirtyChanged();
+            e.namedHandlers.dirtyChanged.handlers = new ArrayList<>();
+            e.namedHandlers.dirtyChanged.handlers.add(null);
+            return e;
+        }
+    }
+
+    public static class AzureNamedHandlers {
+        @JsonProperty("DIRTY-CHANGED")
+        public AzureDirtyChanged dirtyChanged;
+    }
+
+    public static class AzureDirtyChanged {
+        @JsonProperty("_handlers")
+        public List<Object> handlers;
+    }
+}
+
+
+
+
+
