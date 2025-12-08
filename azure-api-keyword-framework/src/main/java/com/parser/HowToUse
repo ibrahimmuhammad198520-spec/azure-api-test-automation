@@ -66,3 +66,88 @@ String bodyJson = AzureResultPayloadBuilder.buildPayload(
         ownerId,
         runById
 );
+==================================
+
+// At test case start
+ExecutionReport report = new ExecutionReport();
+report.testCaseTitle = "Sample Test case for azure devops api calls";
+report.startTimeMillis = System.currentTimeMillis();
+
+// Iteration 1
+IterationReport it1 = new IterationReport();
+it1.iterationId = 1;
+report.iterations.add(it1);
+
+// Step 0 (overall iteration result step)
+StepReport s0 = new StepReport();
+s0.stepIndex = 0;
+s0.actionPath = "";
+s0.indexString = "";
+s0.iterationId = 1;
+s0.startTimeMillis = System.currentTimeMillis();
+
+// ... execute step ...
+s0.status = StepStatus.PASSED;
+s0.comment = "First Test Step First Iteration - comment";
+s0.errorMessage = "First Test Step First Iteration - errorMessage";
+s0.endTimeMillis = System.currentTimeMillis();
+it1.steps.add(s0);
+
+// Step 2
+StepReport s2 = new StepReport();
+s2.stepIndex = 2;
+s2.actionPath = "00000002";
+s2.indexString = "1.";
+s2.iterationId = 1;
+s2.startTimeMillis = System.currentTimeMillis();
+// ...
+s2.status = StepStatus.PASSED;
+s2.comment = "2nd Test Step First Iteration - comment";
+s2.errorMessage = "2nd Test Step First Iteration - errorMessage";
+s2.endTimeMillis = System.currentTimeMillis();
+it1.steps.add(s2);
+
+// Step 3
+StepReport s3 = new StepReport();
+s3.stepIndex = 3;
+s3.actionPath = "00000003";
+s3.indexString = "2.";
+s3.iterationId = 1;
+s3.startTimeMillis = System.currentTimeMillis();
+// ...
+s3.status = StepStatus.PASSED;
+s3.comment = "3rd Test Step First Iteration - comment";
+s3.errorMessage = "3rd Test Step First Iteration - errorMessage";
+s3.endTimeMillis = System.currentTimeMillis();
+it1.steps.add(s3);
+
+// After all iterations:
+report.endTimeMillis = System.currentTimeMillis();
+======================
+
+long testRunId = 261L;
+long testResultId = 100000L;
+long testCaseId = 2089L;
+long testPointId = 88L;
+long configurationId = 43L;
+String configurationName = "Windows 10";
+long planId = 2008L;
+String ownerId = "30bc7dfggdfgsdfgsdgf8da5a";
+String runById = "30bsdgfsdgfdgf9ce88da5a";
+
+String jsonBody = AzureIterationPayloadBuilder.buildPayloadForIteration(
+        report,
+        it1,
+        testRunId,
+        testResultId,
+        testCaseId,
+        testPointId,
+        configurationId,
+        configurationName,
+        planId,
+        ownerId,
+        runById
+);
+
+// Use jsonBody in your POST to:
+// POST https://{org}/{project}/_api/_testresult/Update
