@@ -1,0 +1,457 @@
+public class StepReport {
+
+    // Will become actionId in Azure payload (0, 2, 3, ...)
+    public int stepIndex;
+
+    // Will become actionPath (e.g. "00000002" or "" for the summary row)
+    public String actionPath;
+
+    // Will become indexString (e.g. "1.", "2.", "", "1.1", etc.)
+    public String indexString;
+
+    // Which iteration this step belongs to (1, 2, ...)
+    public int iterationId;
+
+    // Status and messages for this step
+    public StepStatus status = StepStatus.NOT_RUN;
+    public String errorMessage = "";
+    public String comment = "";
+
+    // Timing in epoch millis (System.currentTimeMillis())
+    public long startTimeMillis;
+    public long endTimeMillis;
+
+    public long getDurationMillis() {
+        return Math.max(0L, endTimeMillis - startTimeMillis);
+    }
+}
+
+
+----------------------------
+import java.util.ArrayList;
+import java.util.List;
+
+public class IterationResult {
+
+    public int iterationId;          // 1, 2, 3...
+
+    public long startTimeMillis;
+    public long endTimeMillis;
+
+    // Overall status for this iteration
+    public StepStatus overallStatus = StepStatus.NOT_RUN;
+    public String errorMessage = "";   // iteration-level message
+    public String comment = "";        // iteration-level comment
+
+    public List<StepReport> steps = new ArrayList<>();
+
+    public long getDurationMillis() {
+        return Math.max(0L, endTimeMillis - startTimeMillis);
+    }
+
+    /**
+     * Compute outcome and messages from steps if overallStatus was not set explicitly.
+     * Rule:
+     *  - FAILED if any step FAILED (use first failed step's errorMessage/comment)
+     *  - PASSED if at least one PASSED and none FAILED
+     *  - NOT_RUN if no steps ran
+     */
+    public void computeFromStepsIfNeeded() {
+        if (overallStatus != StepStatus.NOT_RUN) {
+            return; // already set explicitly
+        }
+
+        boolean anyPassed = false;
+        for (StepReport s : steps) {
+            if (s.status == StepStatus.FAILED) {
+                overallStatus = StepStatus.FAILED;
+                if (errorMessage == null || errorMessage.isEmpty()) {
+                    errorMessage = s.errorMessage;
+                    comment = (s.comment != null && !s.comment.isEmpty())
+                            ? s.comment
+                            : s.errorMessage;
+                }
+                return;
+            }
+            if (s.status == StepStatus.PASSED) {
+                anyPassed = true;
+            }
+        }
+
+        overallStatus = anyPassed ? StepStatus.PASSED : StepStatus.NOT_RUN;
+    }
+}
+------------------------------------
+public class TestCaseContext {
+
+    public long testRunId;
+    public long testResultId;
+    public long testCaseId;
+    public long testPointId;
+    public long configurationId;
+    public String configurationName;
+
+    public long planId;
+
+    public String ownerId;
+    public String runById;
+
+    public String testCaseTitle;
+    public String testCaseArea = "";
+
+    // Total iterations / data rows for this test case
+    public int dataRowCount;
+
+    public int testCaseRevision;
+    public int priority;
+}
+---------------------------------------------
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+public class AzureIterationPayloadBuilder {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    static {
+        // Important: DO NOT skip fields even if null/empty
+        MAPPER.setSerializationInclusion(JsonInclude.Include.ALWAYS);
+    }
+
+    /**
+     * Build payload JSON for a single iteration.
+     * Call this at the END of each iteration.
+     */
+    public static String buildPayloadForIteration(TestCaseContext ctx,
+                                                  IterationResult iteration)
+            throws JsonProcessingException {
+
+        // Make sure overallStatus / errorMessage are set
+        iteration.computeFromStepsIfNeeded();
+
+        AzureTestResultUpdateRequest req = new AzureTestResultUpdateRequest();
+        req.testResultId = ctx.testResultId;
+        req.testRunId = ctx.testRunId;
+
+        req.testCaseResult = buildTestCaseResult(ctx, iteration);
+        req.actionResults = buildActionResults(ctx, iteration);
+
+        // Always present, even if empty
+        req.actionResultDeletes = new ArrayList<>();
+        req.parameters = new ArrayList<>();
+        req.parameterDeletes = new ArrayList<>();
+
+        AzureUpdateEnvelope envelope = new AzureUpdateEnvelope();
+        envelope.updateRequests = Collections.singletonList(req);
+
+        return MAPPER.writeValueAsString(envelope);
+    }
+
+    // ---------- testCaseResult ----------
+
+    private static AzureTestCaseResult buildTestCaseResult(TestCaseContext ctx,
+                                                           IterationResult iteration) {
+        AzureTestCaseResult tc = new AzureTestCaseResult();
+
+        // Outcome per iteration
+        tc.outcome = toAzureOutcome(iteration.overallStatus);
+
+        // Use iteration-level error/comment (can adjust if needed)
+        tc.errorMessage = iteration.errorMessage != null ? iteration.errorMessage : "";
+        tc.comment = (iteration.comment != null && !iteration.comment.isEmpty())
+                ? iteration.comment
+                : tc.errorMessage;
+
+        tc.dateStarted = toAzureDate(iteration.startTimeMillis);
+        tc.dateCompleted = toAzureDate(iteration.endTimeMillis);
+        tc.duration = iteration.getDurationMillis();
+
+        tc.id = new AzureResultId();
+        tc.id.testResultId = ctx.testResultId;
+        tc.id.testRunId = ctx.testRunId;
+
+        tc.testCaseId = ctx.testCaseId;
+        tc.configurationId = ctx.configurationId;
+        tc.configurationName = ctx.configurationName;
+        tc.testPointId = ctx.testPointId;
+
+        tc.revision = 0;         // or map from ADO if you have it
+        tc.state = 3;            // completed
+        tc.owner = ctx.ownerId;
+        tc.runBy = ctx.runById;
+
+        tc.testCaseTitle = ctx.testCaseTitle != null ? ctx.testCaseTitle : "";
+        tc.testCaseArea = ctx.testCaseArea != null ? ctx.testCaseArea : "";
+        tc.dataRowCount = ctx.dataRowCount;
+        tc.testCaseRevision = ctx.testCaseRevision;
+        tc.priority = ctx.priority;
+        tc.planId = ctx.planId;
+
+        // _events with DIRTY-CHANGED -> _handlers [null]
+        tc._events = AzureEvents.createDefault();
+
+        return tc;
+    }
+
+    // ---------- actionResults (all steps for THIS iteration) ----------
+
+    private static List<AzureActionResult> buildActionResults(TestCaseContext ctx,
+                                                              IterationResult iteration) {
+        List<AzureActionResult> list = new ArrayList<>();
+
+        for (StepReport step : iteration.steps) {
+            AzureActionResult ar = new AzureActionResult();
+
+            ar.outcome = toAzureOutcome(step.status);
+            ar.errorMessage = step.errorMessage != null ? step.errorMessage : "";
+            ar.comment = step.comment != null ? step.comment : "";
+
+            ar.dateStarted = toAzureDate(step.startTimeMillis);
+            ar.dateCompleted = toAzureDate(step.endTimeMillis);
+            ar.duration = step.getDurationMillis();
+
+            ar.actionId = step.stepIndex;
+            ar.actionPath = step.actionPath != null ? step.actionPath : "";
+
+            ar.parent = null;
+            ar.isSubStep = false;
+            ar.indexString = step.indexString != null ? step.indexString : "";
+
+            AzureResultId id = new AzureResultId();
+            id.testRunId = ctx.testRunId;
+            id.testResultId = ctx.testResultId;
+            ar.id = id;
+
+            ar.iterationId = step.iterationId;
+            ar.revision = 0;
+            ar.actionLogTimeStamp = toAzureDate(step.endTimeMillis);
+
+            list.add(ar);
+        }
+
+        return list;
+    }
+
+    // ---------- helpers ----------
+
+    /**
+     * 0 = NotExecuted, 2 = Passed, 3 = Failed (matches your sample)
+     */
+    private static int toAzureOutcome(StepStatus status) {
+        if (status == null) return 0;
+        switch (status) {
+            case PASSED:
+                return 2;
+            case FAILED:
+                return 3;
+            case NOT_RUN:
+            default:
+                return 0;
+        }
+    }
+
+    private static String toAzureDate(long epochMillis) {
+        return "/Date(" + epochMillis + ")/";
+    }
+
+    // ---------- DTOs (match Azure JSON structure) ----------
+
+    public static class AzureUpdateEnvelope {
+        public List<AzureTestResultUpdateRequest> updateRequests;
+    }
+
+    public static class AzureTestResultUpdateRequest {
+        public long testResultId;
+        public long testRunId;
+        public AzureTestCaseResult testCaseResult;
+        public List<AzureActionResult> actionResults;
+        public List<Object> actionResultDeletes;
+        public List<Object> parameters;
+        public List<Object> parameterDeletes;
+    }
+
+    public static class AzureTestCaseResult {
+        public int outcome;
+        public String errorMessage;
+        public String comment;
+
+        public String dateStarted;
+        public String dateCompleted;
+        public long duration;
+
+        public AzureResultId id;
+
+        public long testCaseId;
+        public long configurationId;
+        public String configurationName;
+        public long testPointId;
+
+        public int revision;
+        public int state;
+        public String owner;
+        public String runBy;
+
+        public String testCaseTitle;
+        public String testCaseArea;
+        public int dataRowCount;
+        public int testCaseRevision;
+        public int priority;
+        public long planId;
+
+        public AzureEvents _events;
+    }
+
+    public static class AzureActionResult {
+        public int outcome;
+        public String errorMessage;
+        public String comment;
+
+        public String dateStarted;
+        public String dateCompleted;
+        public long duration;
+
+        public int actionId;
+        public String actionPath;
+        public Object parent;
+        public boolean isSubStep;
+        public String indexString;
+
+        public AzureResultId id;
+        public int iterationId;
+        public int revision;
+        public String actionLogTimeStamp;
+    }
+
+    public static class AzureResultId {
+        public long testRunId;
+        public long testResultId;
+    }
+
+    // ----- _events/_namedHandlers/DIRTY-CHANGED/_handlers -----
+
+    public static class AzureEvents {
+        @JsonProperty("_namedHandlers")
+        public AzureNamedHandlers namedHandlers;
+
+        public static AzureEvents createDefault() {
+            AzureEvents e = new AzureEvents();
+            e.namedHandlers = new AzureNamedHandlers();
+            e.namedHandlers.dirtyChanged = new AzureDirtyChanged();
+            e.namedHandlers.dirtyChanged.handlers = new ArrayList<>();
+            e.namedHandlers.dirtyChanged.handlers.add(null);
+            return e;
+        }
+    }
+
+    public static class AzureNamedHandlers {
+        @JsonProperty("DIRTY-CHANGED")
+        public AzureDirtyChanged dirtyChanged;
+    }
+
+    public static class AzureDirtyChanged {
+        @JsonProperty("_handlers")
+        public List<Object> handlers;
+    }
+}
+--------------------------------
+
+public class ExampleUsage {
+
+    public static void main(String[] args) throws Exception {
+
+        // 1) Create context ONCE per test case
+        TestCaseContext ctx = new TestCaseContext();
+        ctx.testRunId = 261L;
+        ctx.testResultId = 100000L;
+        ctx.testCaseId = 2089L;
+        ctx.testPointId = 88L;
+        ctx.configurationId = 43L;
+        ctx.configurationName = "Windows 10";
+        ctx.planId = 2008L;
+        ctx.ownerId = "30bc7dfggdfgsdfgsdgf8da5a";
+        ctx.runById = "30bsdgfsdgfdgf9ce88da5a";
+        ctx.testCaseTitle = "Sample Test case for azure devops api calls";
+        ctx.testCaseArea = "";
+        ctx.dataRowCount = 2;       // total iterations
+        ctx.testCaseRevision = 3;
+        ctx.priority = 2;
+
+        // 2) Build iteration 1 result WHILE/AFTER executing that iteration
+        IterationResult it1 = new IterationResult();
+        it1.iterationId = 1;
+        it1.startTimeMillis = System.currentTimeMillis();
+
+        // ---- Step 0 ----
+        StepReport step0 = new StepReport();
+        step0.stepIndex = 0;
+        step0.actionPath = "";
+        step0.indexString = "";
+        step0.iterationId = 1;
+        step0.startTimeMillis = System.currentTimeMillis();
+        // ... execute step 0 ...
+        step0.status = StepStatus.PASSED;
+        step0.errorMessage = "First Test Step First Iteration - errorMessage";
+        step0.comment = "First Test Step First Iteration - comment";
+        step0.endTimeMillis = System.currentTimeMillis();
+        it1.steps.add(step0);
+
+        // ---- Step 2 ----
+        StepReport step2 = new StepReport();
+        step2.stepIndex = 2;
+        step2.actionPath = "00000002";
+        step2.indexString = "1.";
+        step2.iterationId = 1;
+        step2.startTimeMillis = System.currentTimeMillis();
+        // ... execute step 2 ...
+        step2.status = StepStatus.PASSED;
+        step2.errorMessage = "2nd Test Step First Iteration - errorMessage";
+        step2.comment = "2nd Test Step First Iteration - comment";
+        step2.endTimeMillis = System.currentTimeMillis();
+        it1.steps.add(step2);
+
+        // ---- Step 3 ----
+        StepReport step3 = new StepReport();
+        step3.stepIndex = 3;
+        step3.actionPath = "00000003";
+        step3.indexString = "2.";
+        step3.iterationId = 1;
+        step3.startTimeMillis = System.currentTimeMillis();
+        // ... execute step 3 ...
+        step3.status = StepStatus.PASSED;
+        step3.errorMessage = "3rd Test Step First Iteration - errorMessage";
+        step3.comment = "3rd Test Step First Iteration - comment";
+        step3.endTimeMillis = System.currentTimeMillis();
+        it1.steps.add(step3);
+
+        // Finish iteration 1 (test-case-level message if you want)
+        it1.endTimeMillis = System.currentTimeMillis();
+        it1.errorMessage = "TestCase - errorMessage";
+        it1.comment = "TestCase - errorMessage";
+
+        // 3) Build JSON payload FOR THIS ITERATION
+        String jsonBodyForIter1 =
+                AzureIterationPayloadBuilder.buildPayloadForIteration(ctx, it1);
+
+        System.out.println(jsonBodyForIter1);
+
+        // -> Now POST jsonBodyForIter1 to:
+        //    POST https://{org}/{project}/_api/_testresult/Update
+        //
+        // For iteration 2, create another IterationResult (it2),
+        // fill steps for iterationId = 2, and call buildPayloadForIteration(ctx, it2).
+    }
+}
+
+
+
+
+
+
+
