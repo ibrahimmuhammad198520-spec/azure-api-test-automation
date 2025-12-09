@@ -1,0 +1,315 @@
+public enum ExecutionStatus {
+    PASSED,
+    FAILED,
+    NOT_EXECUTED,
+    SKIPPED,
+    BLOCKED
+}
+
+
+=======================
+
+import java.time.Instant;
+
+public class CheckpointResult {
+
+    private final String id;              // e.g. "STEP1_OP1"
+    private final String description;     // e.g. "Verify response code = 200"
+    private ExecutionStatus status;
+    private String expected;
+    private String actual;
+    private String comment;              // short note (e.g. "API timeout")
+    private String errorMessage;         // stacktrace / exception message
+    private final Instant timestamp;
+
+    public CheckpointResult(String id, String description) {
+        this.id = id;
+        this.description = description;
+        this.status = ExecutionStatus.NOT_EXECUTED;
+        this.timestamp = Instant.now();
+    }
+
+    // Getters & setters…
+
+    public void markPassed(String comment) {
+        this.status = ExecutionStatus.PASSED;
+        this.comment = comment;
+    }
+
+    public void markFailed(String comment, String errorMessage) {
+        this.status = ExecutionStatus.FAILED;
+        this.comment = comment;
+        this.errorMessage = errorMessage;
+    }
+
+    public void markSkipped(String comment) {
+        this.status = ExecutionStatus.SKIPPED;
+        this.comment = comment;
+    }
+}
+
+
+=============================================
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class TestStep {
+
+    private String id;
+    private String name;
+    // your existing fields (action, expectedResult, etc.)
+
+    private final List<CheckpointResult> checkpoints = new ArrayList<>();
+    private ExecutionStatus status = ExecutionStatus.NOT_EXECUTED;
+    private String comment; // aggregated / human-friendly
+
+    // Getters & setters…
+
+    public void addCheckpoint(CheckpointResult cp) {
+        checkpoints.add(cp);
+    }
+
+    public List<CheckpointResult> getCheckpoints() {
+        return checkpoints;
+    }
+
+    public ExecutionStatus getStatus() {
+        return status;
+    }
+
+    public String getComment() {
+        return comment;
+    }
+
+    /**
+     * Derive step status from its checkpoints.
+     */
+    public void evaluateStatus() {
+        this.status = ResultAggregator.aggregateCheckpointStatuses(checkpoints);
+        this.comment = ResultAggregator.buildStepComment(this);
+    }
+}
+
+
+====================================================
+
+
+
+import java.util.List;
+
+public class TestCaseData {
+
+    private String id;
+    private String name;
+    // current fields…
+
+    private List<TestStep> steps;
+    private ExecutionStatus status = ExecutionStatus.NOT_EXECUTED;
+    private String comment; // summary of failures / issues
+
+    // Getters & setters…
+
+    public void evaluateStatus() {
+        // First evaluate each step from its checkpoints
+        for (TestStep step : steps) {
+            step.evaluateStatus();
+        }
+
+        this.status = ResultAggregator.aggregateStepStatuses(steps);
+        this.comment = ResultAggregator.buildTestCaseComment(this);
+    }
+
+    public List<TestStep> getSteps() {
+        return steps;
+    }
+
+    public ExecutionStatus getStatus() {
+        return status;
+    }
+
+    public String getComment() {
+        return comment;
+    }
+}
+
+
+
+========================================
+
+
+import java.util.Collection;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public class ResultAggregator {
+
+    // ---------- STATUS AGGREGATION ----------
+
+    public static ExecutionStatus aggregateCheckpointStatuses(
+            Collection<CheckpointResult> checkpoints) {
+
+        if (checkpoints == null || checkpoints.isEmpty()) {
+            return ExecutionStatus.NOT_EXECUTED;
+        }
+
+        boolean anyFailed       = checkpoints.stream().anyMatch(c -> c.getStatus() == ExecutionStatus.FAILED);
+        boolean anyBlocked      = checkpoints.stream().anyMatch(c -> c.getStatus() == ExecutionStatus.BLOCKED);
+        boolean anyPassed       = checkpoints.stream().anyMatch(c -> c.getStatus() == ExecutionStatus.PASSED);
+        boolean anyNotExecuted  = checkpoints.stream().anyMatch(c -> c.getStatus() == ExecutionStatus.NOT_EXECUTED);
+
+        // Priority: FAILED > BLOCKED > NOT_EXECUTED > PASSED
+        if (anyFailed) {
+            return ExecutionStatus.FAILED;
+        } else if (anyBlocked) {
+            return ExecutionStatus.BLOCKED;
+        } else if (anyNotExecuted && !anyPassed) {
+            return ExecutionStatus.NOT_EXECUTED;
+        } else if (anyPassed) {
+            return ExecutionStatus.PASSED;
+        } else {
+            return ExecutionStatus.NOT_EXECUTED;
+        }
+    }
+
+    public static ExecutionStatus aggregateStepStatuses(Collection<TestStep> steps) {
+        if (steps == null || steps.isEmpty()) {
+            return ExecutionStatus.NOT_EXECUTED;
+        }
+
+        boolean anyFailed       = steps.stream().anyMatch(s -> s.getStatus() == ExecutionStatus.FAILED);
+        boolean anyBlocked      = steps.stream().anyMatch(s -> s.getStatus() == ExecutionStatus.BLOCKED);
+        boolean allNotExecuted  = steps.stream().allMatch(s -> s.getStatus() == ExecutionStatus.NOT_EXECUTED);
+        boolean allSkipped      = steps.stream().allMatch(s -> s.getStatus() == ExecutionStatus.SKIPPED);
+
+        if (anyFailed) {
+            return ExecutionStatus.FAILED;
+        } else if (anyBlocked) {
+            return ExecutionStatus.BLOCKED;
+        } else if (allNotExecuted) {
+            return ExecutionStatus.NOT_EXECUTED;
+        } else if (allSkipped) {
+            return ExecutionStatus.SKIPPED;
+        } else {
+            return ExecutionStatus.PASSED;
+        }
+    }
+
+    // ---------- COMMENT AGGREGATION ----------
+
+    public static String buildStepComment(TestStep step) {
+        // Example: concat comments for non-passed checkpoints
+        List<String> msgs = step.getCheckpoints().stream()
+                .filter(cp -> cp.getStatus() != ExecutionStatus.PASSED)
+                .map(cp -> String.format("[%s] %s - %s",
+                        cp.getStatus(),
+                        cp.getDescription(),
+                        nullSafe(cp.getComment())))
+                .collect(Collectors.toList());
+
+        if (msgs.isEmpty()) {
+            return "All checkpoints passed.";
+        }
+        return String.join(" | ", msgs);
+    }
+
+    public static String buildTestCaseComment(TestCaseData tc) {
+        // Include only problem steps
+        List<String> msgs = tc.getSteps().stream()
+                .filter(step -> step.getStatus() != ExecutionStatus.PASSED)
+                .map(step -> String.format("Step '%s' (%s): %s",
+                        step.getId(),
+                        step.getStatus(),
+                        nullSafe(step.getComment())))
+                .collect(Collectors.toList());
+
+        if (msgs.isEmpty()) {
+            return "Test case passed.";
+        }
+        return String.join("\n", msgs);
+    }
+
+    private static String nullSafe(String s) {
+        return (s == null ? "" : s);
+    }
+}
+
+
+
+==========================================
+
+
+public class Checkpoints {
+
+    private Checkpoints() {}
+
+    public static void verify(TestStep step,
+                              String checkpointId,
+                              String description,
+                              boolean condition,
+                              String expected,
+                              String actual,
+                              boolean hardAssert) {
+
+        CheckpointResult cp = new CheckpointResult(checkpointId, description);
+        cp.setExpected(expected);
+        cp.setActual(actual);
+
+        if (condition) {
+            cp.markPassed("Condition met");
+        } else {
+            cp.markFailed("Condition failed",
+                    String.format("Expected: %s, Actual: %s", expected, actual));
+        }
+
+        step.addCheckpoint(cp);
+
+        // If you want hard assertions for some checks
+        if (hardAssert && !condition) {
+            throw new AssertionError(
+                    "Hard assert failed at checkpoint " + checkpointId + ": " + description);
+        }
+    }
+}
+
+
+==============================================
+
+
+public void executeLoginStep(TestStep step) {
+
+    // operation 1
+    boolean pageLoaded = loginPage.isDisplayed();
+    Checkpoints.verify(step,
+            "STEP1_OP1",
+            "Login page is displayed",
+            pageLoaded,
+            "Login page displayed",
+            "Login page visible? " + pageLoaded,
+            false);
+
+    // operation 2
+    boolean loginSuccess = apiResponse.getStatusCode() == 200;
+    Checkpoints.verify(step,
+            "STEP1_OP2",
+            "Login API returns 200",
+            loginSuccess,
+            "HTTP 200",
+            "HTTP " + apiResponse.getStatusCode(),
+            true); // hard assert
+
+    // operation 3 (only runs if previous hard assert didn’t throw)
+    boolean userNameCorrect = dashboard.getUserName().equals("John Doe");
+    Checkpoints.verify(step,
+            "STEP1_OP3",
+            "Dashboard shows correct user name",
+            userNameCorrect,
+            "John Doe",
+            dashboard.getUserName(),
+            false);
+}
+
+
+========================================
+
+
