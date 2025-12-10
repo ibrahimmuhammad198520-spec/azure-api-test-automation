@@ -1,0 +1,219 @@
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+public class TestIterationResult {
+
+    private final int iterationIndex;          // 1,2,3...
+    private final Map<String, Object> dataSet; // your test data for this iteration
+    private final List<TestStep> steps = new ArrayList<>();
+
+    private ExecutionStatus status = ExecutionStatus.NOT_EXECUTED;
+    private String comment; // summary of this iteration
+
+    public TestIterationResult(int iterationIndex, Map<String, Object> dataSet) {
+        this.iterationIndex = iterationIndex;
+        this.dataSet = dataSet;
+    }
+
+    public int getIterationIndex() {
+        return iterationIndex;
+    }
+
+    public Map<String, Object> getDataSet() {
+        return dataSet;
+    }
+
+    public List<TestStep> getSteps() {
+        return steps;
+    }
+
+    public void addStep(TestStep step) {
+        steps.add(step);
+    }
+
+    public ExecutionStatus getStatus() {
+        return status;
+    }
+
+    public String getComment() {
+        return comment;
+    }
+
+    public void evaluateStatus() {
+        // step.status is already evaluated from checkpoints
+        this.status = ResultAggregator.aggregateStepStatuses(steps);
+        this.comment = ResultAggregator.buildIterationComment(this);
+    }
+}
+---------------
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+public class TestCaseData {
+
+    private String id;
+    private String name;
+
+    // "template" steps (no status here, just definition: action, expected result, etc.)
+    private List<TestStep> stepDefinitions;
+
+    // results per iteration
+    private final List<TestIterationResult> iterations = new ArrayList<>();
+
+    private ExecutionStatus status = ExecutionStatus.NOT_EXECUTED;
+    private String comment;
+
+    // --- iteration handling ---
+
+    public TestIterationResult createIteration(int index, Map<String, Object> dataSet) {
+        TestIterationResult iteration = new TestIterationResult(index, dataSet);
+
+        // clone or copy the step definitions for this iteration
+        List<TestStep> clonedSteps = stepDefinitions.stream()
+                .map(TestStep::copyForExecution)   // you add this method
+                .collect(Collectors.toList());
+
+        clonedSteps.forEach(iteration::addStep);
+        iterations.add(iteration);
+        return iteration;
+    }
+
+    public List<TestIterationResult> getIterations() {
+        return iterations;
+    }
+
+    // --- status & comments ---
+
+    public void evaluateStatusFromIterations() {
+        // first, make sure each iteration evaluated its own status
+        for (TestIterationResult iter : iterations) {
+            iter.evaluateStatus();
+        }
+        this.status = ResultAggregator.aggregateIterationStatuses(iterations);
+        this.comment = ResultAggregator.buildTestCaseCommentFromIterations(this);
+    }
+
+    public ExecutionStatus getStatus() {
+        return status;
+    }
+
+    public String getComment() {
+        return comment;
+    }
+}
+
+
+
+-----------
+public TestStep copyForExecution() {
+    TestStep copy = new TestStep();
+    copy.setId(this.id);
+    copy.setName(this.name);
+    // copy other definition fields like action, expectedResult, etc.
+    return copy;
+}
+
+
+---------
+
+public class ResultAggregator {
+
+    // ... existing methods (aggregateCheckpointStatuses, aggregateStepStatuses, etc.)
+
+    public static ExecutionStatus aggregateIterationStatuses(
+            Collection<TestIterationResult> iterations) {
+
+        if (iterations == null || iterations.isEmpty()) {
+            return ExecutionStatus.NOT_EXECUTED;
+        }
+
+        boolean anyFailed       = iterations.stream().anyMatch(i -> i.getStatus() == ExecutionStatus.FAILED);
+        boolean anyBlocked      = iterations.stream().anyMatch(i -> i.getStatus() == ExecutionStatus.BLOCKED);
+        boolean allNotExecuted  = iterations.stream().allMatch(i -> i.getStatus() == ExecutionStatus.NOT_EXECUTED);
+
+        if (anyFailed) {
+            return ExecutionStatus.FAILED;
+        } else if (anyBlocked) {
+            return ExecutionStatus.BLOCKED;
+        } else if (allNotExecuted) {
+            return ExecutionStatus.NOT_EXECUTED;
+        } else {
+            return ExecutionStatus.PASSED;
+        }
+    }
+
+    public static String buildIterationComment(TestIterationResult iter) {
+        // Show only problematic steps
+        List<String> msgs = iter.getSteps().stream()
+                .filter(step -> step.getStatus() != ExecutionStatus.PASSED)
+                .map(step -> String.format("Step '%s' (%s): %s",
+                        step.getId(),
+                        step.getStatus(),
+                        nullSafe(step.getComment())))
+                .collect(Collectors.toList());
+
+        if (msgs.isEmpty()) {
+            return "All steps passed for this iteration.";
+        }
+        return String.join("\n", msgs);
+    }
+
+    public static String buildTestCaseCommentFromIterations(TestCaseData tc) {
+        List<String> msgs = tc.getIterations().stream()
+                .filter(iter -> iter.getStatus() != ExecutionStatus.PASSED)
+                .map(iter -> String.format(
+                        "Iteration %d (%s): %s",
+                        iter.getIterationIndex(),
+                        iter.getStatus(),
+                        nullSafe(iter.getComment())
+                ))
+                .collect(Collectors.toList());
+
+        if (msgs.isEmpty()) {
+            return "All iterations passed.";
+        }
+        return String.join("\n\n", msgs);
+    }
+
+    private static String nullSafe(String s) {
+        return (s == null ? "" : s);
+    }
+}
+
+
+----------
+
+for (int i = 0; i < dataSets.size(); i++) {
+
+    Map<String, Object> dataSet = dataSets.get(i);
+
+    // Create iteration with its own copy of steps
+    TestIterationResult iter = testCase.createIteration(i + 1, dataSet);
+
+    for (TestStep step : iter.getSteps()) {
+        // Your actual step execution method:
+        executeStep(step, dataSet);           // inside: use Checkpoints.verify(...)
+        step.evaluateStatus();                // from checkpoints -> step.status + comment
+    }
+
+    iter.evaluateStatus();                    // from steps -> iteration.status + comment
+}
+
+testCase.evaluateStatusFromIterations();      // from iterations -> testcase.status + comment
+
+
+
+
+
+
+
+
+
+
+
+
+
