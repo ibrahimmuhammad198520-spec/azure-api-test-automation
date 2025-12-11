@@ -1,0 +1,138 @@
+public static String buildTestCaseIterationsComment(
+        String testCaseId,
+        List<TestCaseData> iterations) {
+
+    StringBuilder sb = new StringBuilder("TestCase " + testCaseId + ":\n");
+
+    for (int i = 0; i < iterations.size(); i++) {
+        TestCaseData it = iterations.get(i);
+        sb.append("Iteration ")
+          .append(i + 1)
+          .append(" -> ")
+          .append(it.getStatus());
+
+        if (it.getComment() != null && !it.getComment().isEmpty()) {
+            sb.append(" : ").append(it.getComment());
+        }
+        sb.append('\n');
+    }
+    return sb.toString().trim();
+}
+==============================
+
+  Usage:
+
+String summaryComment =
+        ResultAggregator.buildTestCaseIterationsComment("TC-001", iterations);
+===========================================
+
+  Safe pattern for step execution
+
+Wherever you execute a step (inside your runner), do it like this:
+
+public void executeStep(TestStep step) {
+    // 1) Reset from previous run / previous iteration
+    step.getCheckpoints().clear();   // <-- keep this, but only at the START
+
+    // 2) Perform operations & add checkpoints
+    //    Checkpoints.verify(step, ...);
+    //    Checkpoints.verify(step, ...);
+    //    ...
+
+    // 3) Freeze the final step result for this run/iteration
+    step.evaluateStatus();           // <-- MUST be called while checkpoints are still there
+
+    // 4) OPTIONAL: if you really want to free memory, you can clear here:
+    // step.getCheckpoints().clear();
+}
+
+===============================================
+2. Make evaluateStatus() independent of future clears
+
+Your TestStep.evaluateStatus() should:
+
+Read checkpoints.
+
+Set status and comment.
+
+Optionally clear the list.
+
+public class TestStep {
+
+    private final List<CheckpointResult> checkpoints = new ArrayList<>();
+    private ExecutionStatus status = ExecutionStatus.NOT_EXECUTED;
+    private String comment;
+
+    public void evaluateStatus() {
+        // 1) derive status from checkpoints
+        this.status = ResultAggregator.aggregateCheckpointStatuses(checkpoints);
+
+        // 2) derive human-readable comment
+        this.comment = ResultAggregator.buildStepComment(this);
+
+        // 3) OPTIONAL: now it's safe to clear, because status + comment are frozen
+        //    (remove this line if you still need checkpoints later for reporting)
+        // checkpoints.clear();
+    }
+
+    public ExecutionStatus getStatus() {
+        return status;
+    }
+
+    public String getComment() {
+        return comment;
+    }
+
+    public List<CheckpointResult> getCheckpoints() {
+        return checkpoints;
+    }
+}
+
+
+As long as testcase / iteration logic only uses step.getStatus() and step.getComment(), it doesn’t care if checkpoints was later cleared.
+
+  ===============================================================
+
+
+  3. TestCase + iterations: this still works
+
+For iterations, with the solution I gave before:
+
+// each iteration is a TestCaseData
+for (TestCaseData iteration : iterations) {
+    // you already executed all steps inside this iteration,
+    // and each step has step.status and step.comment set.
+    iteration.evaluateStatus();   // this only aggregates STEP STATUSES
+}
+ExecutionStatus overallTestStatus =
+        ResultAggregator.aggregateTestCaseIterationsStatus(iterations);
+
+
+Your TestCaseData.evaluateStatus() must not depend on checkpoints anymore, only on step statuses:
+
+public class TestCaseData {
+
+    private List<TestStep> steps;
+    private ExecutionStatus status;
+    private String comment;
+
+    public void evaluateStatus() {
+        // DO NOT call step.evaluateStatus() here if you already called it in executeStep()
+        this.status = ResultAggregator.aggregateStepStatuses(steps);
+        this.comment = ResultAggregator.buildTestCaseComment(this);
+    }
+
+    public List<TestStep> getSteps() { return steps; }
+    public ExecutionStatus getStatus() { return status; }
+    public String getComment() { return comment; }
+}
+
+
+aggregateStepStatuses(steps) and buildTestCaseComment(this) should use only:
+
+step.getStatus()
+
+step.getComment()
+
+
+  
