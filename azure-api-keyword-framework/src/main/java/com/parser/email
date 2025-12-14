@@ -1,0 +1,586 @@
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class AzureRunPayloadBuilder {
+
+    // --- Inner DTOs only for payload generation ---
+
+    // This becomes the JSON for "runModel" (before being turned into a string)
+    private static class RunModel {
+        public String owner;
+        public String title;
+        public String iteration;
+        public String build;
+        public String state;
+        public boolean isAutomated;
+        public int testPlanId;
+        public int testSettingsId;
+        public int testRunId;
+    }
+
+    // This becomes each object inside testResultCreationRequestModels array
+    private static class TestResultModel {
+        public int testCaseId;
+        public int configurationId;
+        public String configurationName;
+        public int testPointId;
+        public String owner;
+    }
+
+    // Outer wrapper sent to API
+    private static class RunCreationPayload {
+        public String runModel;
+        public String testResultCreationRequestModels;
+    }
+
+    // --- Builder state ---
+
+    private final ObjectMapper mapper;
+    private final RunModel runModel;
+    private final List<TestResultModel> results;
+
+    public AzureRunPayloadBuilder() {
+        this.mapper = new ObjectMapper();
+        this.mapper.enable(SerializationFeature.INDENT_OUTPUT); // optional
+        this.runModel = new RunModel();
+        this.results = new ArrayList<>();
+    }
+
+    // ---------- Run-level setters (you call with raw values) ----------
+
+    public AzureRunPayloadBuilder setRunInfo(String owner,
+                                             String title,
+                                             String iteration,
+                                             String build,
+                                             String state,
+                                             boolean isAutomated,
+                                             int testPlanId,
+                                             int testSettingsId,
+                                             int testRunId) {
+        runModel.owner = owner;
+        runModel.title = title;
+        runModel.iteration = iteration;
+        runModel.build = build;
+        runModel.state = state;
+        runModel.isAutomated = isAutomated;
+        runModel.testPlanId = testPlanId;
+        runModel.testSettingsId = testSettingsId;
+        runModel.testRunId = testRunId;
+        return this;
+    }
+
+    // ---------- Add results (one call per test / per test point) ----------
+
+    public AzureRunPayloadBuilder addResult(int testCaseId,
+                                            int configurationId,
+                                            String configurationName,
+                                            int testPointId,
+                                            String owner) {
+        TestResultModel m = new TestResultModel();
+        m.testCaseId = testCaseId;
+        m.configurationId = configurationId;
+        m.configurationName = configurationName;
+        m.testPointId = testPointId;
+        m.owner = owner;
+        results.add(m);
+        return this;
+    }
+
+    // ---------- Build final JSON payload ----------
+
+    public String build() throws JsonProcessingException {
+        // 1) Inner JSON strings
+        String runModelJson = mapper.writeValueAsString(runModel);
+        String resultsJson = mapper.writeValueAsString(results);
+
+        // 2) Outer payload
+        RunCreationPayload payload = new RunCreationPayload();
+        payload.runModel = runModelJson;
+        payload.testResultCreationRequestModels = resultsJson;
+
+        // 3) Serialize outer payload
+        return mapper.writeValueAsString(payload);
+    }
+}
+
+
+
+==============================================================
+
+
+How you will use it from your existing code
+
+From your framework, you do not pass TestCaseData objects.
+You just pass raw values you already have in them:
+
+String ownerGuid = "30bc7df2-5a0d-4ef8-951d-8079ce88da5a";
+
+AzureRunPayloadBuilder builder = new AzureRunPayloadBuilder()
+        .setRunInfo(
+                ownerGuid,
+                "ATM-Token-Transaction (Manual)",
+                "The T",         // iteration
+                "",              // build
+                "",              // state
+                false,           // isAutomated
+                1008,            // testPlanId
+                98,              // testSettingsId
+                0                // testRunId
+        );
+
+// Example: add three results (you can loop over your own list)
+builder.addResult(61,    43, "Windows 10", 81, ownerGuid);
+builder.addResult(2088,  43, "Windows 10", 88, ownerGuid);
+builder.addResult(2089,  43, "Windows 10", 89, ownerGuid);
+
+// Final JSON body to send
+String jsonPayload = builder.build();
+System.out.println(jsonPayload);
+
+
+
+
+
+
+Where you have your own TestCaseData list, you’ll just do:
+
+for (TestCaseData tc : myTests) {
+    builder.addResult(
+        tc.getTestCaseId(),
+        tc.getConfigurationId(),
+        tc.getConfigurationName(),
+        tc.getTestPointId(),
+        ownerGuid // or tc.getOwnerGuid()
+    );
+}
+String jsonPayload = builder.build();
+
+
+===================================================\\\\
+
+<dependency>
+    <groupId>com.sun.mail</groupId>
+    <artifactId>jakarta.mail</artifactId>
+    <version>2.0.1</version>
+</dependency>
+
+
+
+
+
+import jakarta.mail.*;
+import jakarta.mail.internet.*;
+
+import java.io.File;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.List;
+import java.util.Properties;
+
+/**
+ * Independent utility to send a test execution summary email with optional attachment.
+ * - Uses SMTP
+ * - Only attaches file if size > 10KB
+ * - Sends a styled HTML summary (similar to Azure DevOps test run summary)
+ */
+public class ExecutionReportMailer {
+
+    // ---------- Simple POJO: SMTP config ----------
+
+    public static class EmailConfig {
+        private String smtpHost;
+        private int smtpPort;
+        private boolean useStartTls;
+        private String username;
+        private String password;
+        private String fromAddress;
+        private String fromName;
+
+        // Getters/setters
+        public String getSmtpHost() { return smtpHost; }
+        public void setSmtpHost(String smtpHost) { this.smtpHost = smtpHost; }
+
+        public int getSmtpPort() { return smtpPort; }
+        public void setSmtpPort(int smtpPort) { this.smtpPort = smtpPort; }
+
+        public boolean isUseStartTls() { return useStartTls; }
+        public void setUseStartTls(boolean useStartTls) { this.useStartTls = useStartTls; }
+
+        public String getUsername() { return username; }
+        public void setUsername(String username) { this.username = username; }
+
+        public String getPassword() { return password; }
+        public void setPassword(String password) { this.password = password; }
+
+        public String getFromAddress() { return fromAddress; }
+        public void setFromAddress(String fromAddress) { this.fromAddress = fromAddress; }
+
+        public String getFromName() { return fromName; }
+        public void setFromName(String fromName) { this.fromName = fromName; }
+    }
+
+    // ---------- Simple POJO: test execution summary ----------
+
+    public static class TestExecutionSummary {
+        private String suiteName;
+        private String runName;
+        private String environment;
+        private String buildNumber;
+        private String runBy;
+        private String runUrl;          // Azure DevOps run URL
+        private int totalTests;
+        private int passed;
+        private int failed;
+        private int blocked;
+        private int notExecuted;
+        private LocalDateTime startTime;
+        private LocalDateTime endTime;
+
+        // Getters/setters
+        public String getSuiteName() { return suiteName; }
+        public void setSuiteName(String suiteName) { this.suiteName = suiteName; }
+
+        public String getRunName() { return runName; }
+        public void setRunName(String runName) { this.runName = runName; }
+
+        public String getEnvironment() { return environment; }
+        public void setEnvironment(String environment) { this.environment = environment; }
+
+        public String getBuildNumber() { return buildNumber; }
+        public void setBuildNumber(String buildNumber) { this.buildNumber = buildNumber; }
+
+        public String getRunBy() { return runBy; }
+        public void setRunBy(String runBy) { this.runBy = runBy; }
+
+        public String getRunUrl() { return runUrl; }
+        public void setRunUrl(String runUrl) { this.runUrl = runUrl; }
+
+        public int getTotalTests() { return totalTests; }
+        public void setTotalTests(int totalTests) { this.totalTests = totalTests; }
+
+        public int getPassed() { return passed; }
+        public void setPassed(int passed) { this.passed = passed; }
+
+        public int getFailed() { return failed; }
+        public void setFailed(int failed) { this.failed = failed; }
+
+        public int getBlocked() { return blocked; }
+        public void setBlocked(int blocked) { this.blocked = blocked; }
+
+        public int getNotExecuted() { return notExecuted; }
+        public void setNotExecuted(int notExecuted) { this.notExecuted = notExecuted; }
+
+        public LocalDateTime getStartTime() { return startTime; }
+        public void setStartTime(LocalDateTime startTime) { this.startTime = startTime; }
+
+        public LocalDateTime getEndTime() { return endTime; }
+        public void setEndTime(LocalDateTime endTime) { this.endTime = endTime; }
+    }
+
+    // ---------- Public API: send email ----------
+
+    /**
+     * Sends an HTML execution summary email with optional attachment (only if attachment size > 10KB).
+     *
+     * @param config        SMTP configuration
+     * @param summary       Test execution summary data
+     * @param toAddresses   List of "To" recipients (email addresses)
+     * @param ccAddresses   List of "Cc" recipients (email addresses) - can be null or empty
+     * @param subject       Email subject
+     * @param attachment    Report file to attach (e.g., Extent report). Can be null.
+     * @throws MessagingException if sending fails
+     */
+    public static void sendExecutionReportEmail(EmailConfig config,
+                                                TestExecutionSummary summary,
+                                                List<String> toAddresses,
+                                                List<String> ccAddresses,
+                                                String subject,
+                                                File attachment) throws MessagingException {
+
+        Session session = createMailSession(config);
+
+        MimeMessage message = new MimeMessage(session);
+
+        try {
+            // From
+            if (config.getFromName() != null && !config.getFromName().isEmpty()) {
+                message.setFrom(new InternetAddress(config.getFromAddress(), config.getFromName()));
+            } else {
+                message.setFrom(new InternetAddress(config.getFromAddress()));
+            }
+
+            // To
+            for (String to : toAddresses) {
+                message.addRecipient(Message.RecipientType.TO, new InternetAddress(to));
+            }
+
+            // Cc (optional)
+            if (ccAddresses != null) {
+                for (String cc : ccAddresses) {
+                    message.addRecipient(Message.RecipientType.CC, new InternetAddress(cc));
+                }
+            }
+
+            message.setSubject(subject);
+
+            // HTML body
+            String htmlBody = buildHtmlEmailBody(summary);
+
+            // Multipart: body + optional attachment
+            Multipart multipart = new MimeMultipart();
+
+            // Body part (HTML)
+            MimeBodyPart htmlPart = new MimeBodyPart();
+            htmlPart.setContent(htmlBody, "text/html; charset=utf-8");
+            multipart.addBodyPart(htmlPart);
+
+            // Attachment (only if > 10KB)
+            if (attachment != null && attachment.exists() && attachment.isFile()) {
+                long fileSizeBytes = attachment.length();
+                if (fileSizeBytes > 10 * 1024) { // > 10 KB
+                    MimeBodyPart attachmentPart = new MimeBodyPart();
+                    attachmentPart.attachFile(attachment);
+                    attachmentPart.setFileName(attachment.getName());
+                    multipart.addBodyPart(attachmentPart);
+                }
+            }
+
+            message.setContent(multipart);
+
+            Transport.send(message);
+
+        } catch (Exception e) {
+            // Wrap any non-MessagingException inside MessagingException for simplicity
+            if (e instanceof MessagingException) {
+                throw (MessagingException) e;
+            } else {
+                throw new MessagingException("Failed to send execution report email", e);
+            }
+        }
+    }
+
+    // ---------- Internal: create mail session ----------
+
+    private static Session createMailSession(EmailConfig config) {
+        Properties props = new Properties();
+        props.put("mail.smtp.auth", "true");
+        if (config.isUseStartTls()) {
+            props.put("mail.smtp.starttls.enable", "true");
+        }
+        props.put("mail.smtp.host", config.getSmtpHost());
+        props.put("mail.smtp.port", String.valueOf(config.getSmtpPort()));
+
+        Authenticator auth = new Authenticator() {
+            protected PasswordAuthentication getPasswordAuthentication() {
+                return new PasswordAuthentication(config.getUsername(), config.getPassword());
+            }
+        };
+
+        return Session.getInstance(props, auth);
+    }
+
+    // ---------- Internal: build beautiful HTML body ----------
+
+    private static String buildHtmlEmailBody(TestExecutionSummary s) {
+        DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+        String start = s.getStartTime() != null ? s.getStartTime().format(dtf) : "-";
+        String end = s.getEndTime() != null ? s.getEndTime().format(dtf) : "-";
+
+        int total = s.getTotalTests();
+        int passed = s.getPassed();
+        int failed = s.getFailed();
+        int blocked = s.getBlocked();
+        int notExecuted = s.getNotExecuted();
+
+        double passRate = (total > 0) ? (passed * 100.0 / total) : 0.0;
+
+        // Simple guard to avoid negative/invalid numbers
+        if (total == 0) {
+            total = passed + failed + blocked + notExecuted;
+        }
+
+        // Responsive, Azure DevOps–style summary with status colors
+        return "<!DOCTYPE html>" +
+                "<html lang='en'>" +
+                "<head>" +
+                "  <meta charset='UTF-8'/>" +
+                "  <title>Test Execution Summary</title>" +
+                "  <style>" +
+                "    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f3f4f6; margin: 0; padding: 0; }" +
+                "    .container { max-width: 800px; margin: 30px auto; background: #ffffff; border-radius: 8px; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.10); overflow: hidden; }" +
+                "    .header { padding: 20px 24px; background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #ffffff; }" +
+                "    .header h1 { margin: 0 0 4px; font-size: 20px; }" +
+                "    .header p { margin: 0; opacity: 0.9; font-size: 13px; }" +
+                "    .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 11px; background: rgba(15,23,42,0.15); margin-left: 8px; }" +
+                "    .section { padding: 18px 24px; border-top: 1px solid #e5e7eb; }" +
+                "    .section-title { font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.04em; }" +
+                "    .meta-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 24px; font-size: 13px; color: #4b5563; }" +
+                "    .meta-label { color: #6b7280; font-size: 12px; }" +
+                "    .meta-value { font-weight: 500; }" +
+                "    .stats-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; font-size: 13px; margin-top: 8px; }" +
+                "    .card { background-color: #f9fafb; border-radius: 8px; padding: 10px 8px; text-align: center; border: 1px solid #e5e7eb; }" +
+                "    .card-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #6b7280; margin-bottom: 4px; }" +
+                "    .card-value { font-size: 18px; font-weight: 700; }" +
+                "    .card-total { color: #111827; }" +
+                "    .card-passed { color: #15803d; }" +
+                "    .card-failed { color: #b91c1c; }" +
+                "    .card-blocked { color: #92400e; }" +
+                "    .card-ne { color: #4b5563; }" +
+                "    .progress-bar-bg { margin-top: 12px; width: 100%; height: 10px; border-radius: 999px; background-color: #e5e7eb; overflow: hidden; }" +
+                "    .progress-bar-fill { height: 10px; background: linear-gradient(90deg, #22c55e, #16a34a); }" +
+                "    .footer { padding: 16px 24px; font-size: 12px; color: #6b7280; background-color: #f9fafb; border-top: 1px solid #e5e7eb; text-align: right; }" +
+                "    a.run-link { color: #2563eb; text-decoration: none; font-weight: 500; }" +
+                "    a.run-link:hover { text-decoration: underline; }" +
+                "    @media (max-width: 640px) {" +
+                "      .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }" +
+                "      .meta-grid { grid-template-columns: 1fr; }" +
+                "    }" +
+                "  </style>" +
+                "</head>" +
+                "<body>" +
+                "  <div class='container'>" +
+
+                "    <div class='header'>" +
+                "      <h1>" + escapeHtml(nullSafe(s.getRunName())) + "</h1>" +
+                "      <p>" +
+                "        Suite: <strong>" + escapeHtml(nullSafe(s.getSuiteName())) + "</strong>" +
+                "        <span class='pill'>" + escapeHtml(nullSafe(s.getEnvironment())) + "</span>" +
+                "      </p>" +
+                "    </div>" +
+
+                "    <div class='section'>" +
+                "      <div class='section-title'>Overview</div>" +
+                "      <div class='meta-grid'>" +
+                "        <div><div class='meta-label'>Run By</div><div class='meta-value'>" + escapeHtml(nullSafe(s.getRunBy())) + "</div></div>" +
+                "        <div><div class='meta-label'>Build</div><div class='meta-value'>" + escapeHtml(nullSafe(s.getBuildNumber())) + "</div></div>" +
+                "        <div><div class='meta-label'>Start Time</div><div class='meta-value'>" + start + "</div></div>" +
+                "        <div><div class='meta-label'>End Time</div><div class='meta-value'>" + end + "</div></div>" +
+                "      </div>" +
+                "      <div style='margin-top:12px;font-size:13px;color:#4b5563;'>" +
+                "        Pass Rate: <strong>" + String.format("%.1f", passRate) + "%</strong>" +
+                "      </div>" +
+                "      <div class='progress-bar-bg'>" +
+                "        <div class='progress-bar-fill' style='width:" + Math.min(100.0, Math.max(0.0, passRate)) + "%;'></div>" +
+                "      </div>" +
+                "    </div>" +
+
+                "    <div class='section'>" +
+                "      <div class='section-title'>Execution Summary</div>" +
+                "      <div class='stats-grid'>" +
+                "        <div class='card'>" +
+                "          <div class='card-label'>Total</div>" +
+                "          <div class='card-value card-total'>" + total + "</div>" +
+                "        </div>" +
+                "        <div class='card'>" +
+                "          <div class='card-label'>Passed</div>" +
+                "          <div class='card-value card-passed'>" + passed + "</div>" +
+                "        </div>" +
+                "        <div class='card'>" +
+                "          <div class='card-label'>Failed</div>" +
+                "          <div class='card-value card-failed'>" + failed + "</div>" +
+                "        </div>" +
+                "        <div class='card'>" +
+                "          <div class='card-label'>Blocked</div>" +
+                "          <div class='card-value card-blocked'>" + blocked + "</div>" +
+                "        </div>" +
+                "        <div class='card'>" +
+                "          <div class='card-label'>Not Executed</div>" +
+                "          <div class='card-value card-ne'>" + notExecuted + "</div>" +
+                "        </div>" +
+                "      </div>" +
+                "    </div>" +
+
+                "    <div class='section'>" +
+                "      <div class='section-title'>Azure DevOps</div>" +
+                "      <div style='font-size:13px;color:#4b5563;'>" +
+                "        View full run details in Azure DevOps: ";
+        if (s.getRunUrl() != null && !s.getRunUrl().isEmpty()) {
+            return html + "<a class='run-link' href='" + escapeHtml(s.getRunUrl()) + "' target='_blank'>Open Test Run</a>" +
+                    "      </div>" +
+                    "    </div>" +
+                    "    <div class='footer'>" +
+                    "      This is an automated notification from the Test Automation Framework." +
+                    "    </div>" +
+                    "  </div>" +
+                    "</body></html>";
+        } else {
+            return html + "<span class='meta-value'>Run URL not provided</span>" +
+                    "      </div>" +
+                    "    </div>" +
+                    "    <div class='footer'>" +
+                    "      This is an automated notification from the Test Automation Framework." +
+                    "    </div>" +
+                    "  </div>" +
+                    "</body></html>";
+        }
+    }
+
+    private static String nullSafe(String s) {
+        return s == null ? "" : s;
+    }
+
+    // Very small HTML escaping for safety
+    private static String escapeHtml(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;");
+    }
+
+    // ---------- Example main() for quick test ----------
+
+    public static void main(String[] args) throws Exception {
+        // 1) Configure SMTP (example: Gmail SMTP with app password)
+        EmailConfig cfg = new EmailConfig();
+        cfg.setSmtpHost("smtp.gmail.com");
+        cfg.setSmtpPort(587);
+        cfg.setUseStartTls(true);
+        cfg.setUsername("your-email@gmail.com");        // TODO
+        cfg.setPassword("your-app-password-here");      // TODO
+        cfg.setFromAddress("your-email@gmail.com");     // TODO
+        cfg.setFromName("Automation Framework");
+
+        // 2) Build test execution summary
+        TestExecutionSummary summary = new TestExecutionSummary();
+        summary.setSuiteName("ATM Token Transactions");
+        summary.setRunName("ATM-Token-Transaction Regression Suite");
+        summary.setEnvironment("UAT");
+        summary.setBuildNumber("Build-2025.12.14.01");
+        summary.setRunBy("Automation Bot");
+        summary.setRunUrl("https://dev.azure.com/your-org/your-project/_testManagement/runs?runId=12345");
+        summary.setTotalTests(120);
+        summary.setPassed(110);
+        summary.setFailed(5);
+        summary.setBlocked(3);
+        summary.setNotExecuted(2);
+        summary.setStartTime(LocalDateTime.now().minusMinutes(30));
+        summary.setEndTime(LocalDateTime.now());
+
+        // 3) Recipients
+        List<String> to = List.of("recipient1@company.com", "recipient2@company.com");
+        List<String> cc = List.of("manager@company.com");
+
+        // 4) Attachment (Extent report)
+        File extentReport = new File("ExtentReport.html"); // path to your report
+
+        // 5) Send
+        sendExecutionReportEmail(
+                cfg,
+                summary,
+                to,
+                cc,
+                "Test Execution Summary - " + summary.getRunName(),
+                extentReport
+        );
+    }
+}
+
+
+
+
