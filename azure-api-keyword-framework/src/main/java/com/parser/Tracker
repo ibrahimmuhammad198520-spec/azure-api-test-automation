@@ -1,0 +1,514 @@
+public enum ExecutionStatus {
+    PASSED,     // -> ADO: "Passed"
+    FAILED,     // -> ADO: "Failed"
+    BLOCKED,    // -> ADO: "Blocked"
+    NOT_EXECUTED, // -> ADO: "NotExecuted"
+    SKIPPED     // -> ADO: "NotApplicable"
+}
+
+
+
+public final class AzureStatusMapper {
+
+    private AzureStatusMapper() {}
+
+    public static String toAzureOutcome(ExecutionStatus status) {
+        if (status == null) return "None";
+        switch (status) {
+            case PASSED:        return "Passed";
+            case FAILED:        return "Failed";
+            case BLOCKED:       return "Blocked";
+            case SKIPPED:       return "NotApplicable";
+            case NOT_EXECUTED:
+            default:            return "NotExecuted";
+        }
+    }
+}
+
+
+
+
+
+import java.time.Instant;
+
+public class CheckpointRecord {
+    private final String id;            // e.g. "API-001"
+    private final String description;   // e.g. "Verify /login 200 OK"
+    private ExecutionStatus status;
+    private String comment;             // “PASS: …” / “FAIL: …”
+    private String details;             // expected/actual etc.
+    private final Instant timestamp;
+
+    public CheckpointRecord(String id, String description) {
+        this.id = id;
+        this.description = description;
+        this.status = ExecutionStatus.NOT_EXECUTED;
+        this.timestamp = Instant.now();
+    }
+
+    public void mark(ExecutionStatus status, String comment, String details) {
+        this.status = status;
+        this.comment = comment;
+        this.details = details;
+    }
+
+    // Getters…
+
+    public String getId() { return id; }
+    public String getDescription() { return description; }
+    public ExecutionStatus getStatus() { return status; }
+    public String getComment() { return comment; }
+    public String getDetails() { return details; }
+    public Instant getTimestamp() { return timestamp; }
+}
+
+
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class StepRecord {
+    private final String stepId;
+    private final String stepName;
+    private final List<CheckpointRecord> checkpoints = new ArrayList<>();
+    private ExecutionStatus status = ExecutionStatus.NOT_EXECUTED;
+    private String comment; // aggregated
+
+    public StepRecord(String stepId, String stepName) {
+        this.stepId = stepId;
+        this.stepName = stepName;
+    }
+
+    public void addCheckpoint(CheckpointRecord cp) {
+        checkpoints.add(cp);
+    }
+
+    public List<CheckpointRecord> getCheckpoints() { return checkpoints; }
+    public ExecutionStatus getStatus() { return status; }
+    public void setStatus(ExecutionStatus status) { this.status = status; }
+    public String getComment() { return comment; }
+    public void setComment(String comment) { this.comment = comment; }
+    public String getStepId() { return stepId; }
+    public String getStepName() { return stepName; }
+}
+
+
+
+
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+public class IterationRecord {
+    private final int iterationIndex; // 1-based
+    private final Map<String, StepRecord> steps = new LinkedHashMap<>();
+    private ExecutionStatus status = ExecutionStatus.NOT_EXECUTED;
+    private String comment;
+
+    public IterationRecord(int iterationIndex) {
+        this.iterationIndex = iterationIndex;
+    }
+
+    public int getIterationIndex() { return iterationIndex; }
+    public Map<String, StepRecord> getSteps() { return steps; }
+    public ExecutionStatus getStatus() { return status; }
+    public void setStatus(ExecutionStatus status) { this.status = status; }
+    public String getComment() { return comment; }
+    public void setComment(String comment) { this.comment = comment; }
+}
+
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+public class TestCaseRecord {
+    private final String testCaseId;    // Azure DevOps test case ID
+    private final String testCaseName;
+    private final Map<Integer, IterationRecord> iterations = new LinkedHashMap<>();
+    private ExecutionStatus status = ExecutionStatus.NOT_EXECUTED;
+    private String comment;
+
+    public TestCaseRecord(String testCaseId, String testCaseName) {
+        this.testCaseId = testCaseId;
+        this.testCaseName = testCaseName;
+    }
+
+    public String getTestCaseId() { return testCaseId; }
+    public String getTestCaseName() { return testCaseName; }
+    public Map<Integer, IterationRecord> getIterations() { return iterations; }
+    public ExecutionStatus getStatus() { return status; }
+    public void setStatus(ExecutionStatus status) { this.status = status; }
+    public String getComment() { return comment; }
+    public void setComment(String comment) { this.comment = comment; }
+}
+
+
+
+
+import java.util.Collection;
+import java.util.stream.Collectors;
+
+public final class ResultAggregator {
+
+    private ResultAggregator() {}
+
+    public static ExecutionStatus aggregateCheckpointStatuses(Collection<CheckpointRecord> checkpoints) {
+        if (checkpoints == null || checkpoints.isEmpty()) {
+            return ExecutionStatus.NOT_EXECUTED;
+        }
+        boolean anyFailed      = checkpoints.stream().anyMatch(c -> c.getStatus() == ExecutionStatus.FAILED);
+        boolean anyBlocked     = checkpoints.stream().anyMatch(c -> c.getStatus() == ExecutionStatus.BLOCKED);
+        boolean anyPassed      = checkpoints.stream().anyMatch(c -> c.getStatus() == ExecutionStatus.PASSED);
+        boolean allNotExecuted = checkpoints.stream().allMatch(c -> c.getStatus() == ExecutionStatus.NOT_EXECUTED);
+
+        if (anyFailed)  return ExecutionStatus.FAILED;
+        if (anyBlocked) return ExecutionStatus.BLOCKED;
+        if (allNotExecuted) return ExecutionStatus.NOT_EXECUTED;
+        if (anyPassed)  return ExecutionStatus.PASSED;
+        return ExecutionStatus.NOT_EXECUTED;
+    }
+
+    public static ExecutionStatus aggregateStepStatuses(Collection<StepRecord> steps) {
+        if (steps == null || steps.isEmpty()) {
+            return ExecutionStatus.NOT_EXECUTED;
+        }
+        boolean anyFailed      = steps.stream().anyMatch(s -> s.getStatus() == ExecutionStatus.FAILED);
+        boolean anyBlocked     = steps.stream().anyMatch(s -> s.getStatus() == ExecutionStatus.BLOCKED);
+        boolean allNotExecuted = steps.stream().allMatch(s -> s.getStatus() == ExecutionStatus.NOT_EXECUTED);
+        boolean allSkipped     = steps.stream().allMatch(s -> s.getStatus() == ExecutionStatus.SKIPPED);
+
+        if (anyFailed)  return ExecutionStatus.FAILED;
+        if (anyBlocked) return ExecutionStatus.BLOCKED;
+        if (allNotExecuted) return ExecutionStatus.NOT_EXECUTED;
+        if (allSkipped)  return ExecutionStatus.SKIPPED;
+        return ExecutionStatus.PASSED;
+    }
+
+    public static ExecutionStatus aggregateIterationStatuses(Collection<IterationRecord> iterations) {
+        if (iterations == null || iterations.isEmpty()) {
+            return ExecutionStatus.NOT_EXECUTED;
+        }
+        boolean anyFailed      = iterations.stream().anyMatch(i -> i.getStatus() == ExecutionStatus.FAILED);
+        boolean anyBlocked     = iterations.stream().anyMatch(i -> i.getStatus() == ExecutionStatus.BLOCKED);
+        boolean allNotExecuted = iterations.stream().allMatch(i -> i.getStatus() == ExecutionStatus.NOT_EXECUTED);
+        boolean allSkipped     = iterations.stream().allMatch(i -> i.getStatus() == ExecutionStatus.SKIPPED);
+
+        if (anyFailed)  return ExecutionStatus.FAILED;
+        if (anyBlocked) return ExecutionStatus.BLOCKED;
+        if (allNotExecuted) return ExecutionStatus.NOT_EXECUTED;
+        if (allSkipped)  return ExecutionStatus.SKIPPED;
+        return ExecutionStatus.PASSED;
+    }
+
+    // Comment builders (for ADO + reports)
+
+    public static String buildStepComment(StepRecord step) {
+        String problems = step.getCheckpoints().stream()
+                .filter(cp -> cp.getStatus() != ExecutionStatus.PASSED)
+                .map(cp ->
+                        "[" + cp.getStatus() + "] " + cp.getId() + " - " +
+                        nullSafe(cp.getComment()))
+                .collect(Collectors.joining(" | "));
+        if (problems.isEmpty()) {
+            return "All checkpoints passed.";
+        }
+        return problems;
+    }
+
+    public static String buildIterationComment(IterationRecord it) {
+        String problems = it.getSteps().values().stream()
+                .filter(s -> s.getStatus() != ExecutionStatus.PASSED)
+                .map(s -> "Step '" + s.getStepName() + "' (" + s.getStatus() + "): " + nullSafe(s.getComment()))
+                .collect(Collectors.joining(" || "));
+        if (problems.isEmpty()) {
+            return "All steps passed in iteration #" + it.getIterationIndex() + ".";
+        }
+        return problems;
+    }
+
+    public static String buildTestCaseComment(TestCaseRecord tc) {
+        String problems = tc.getIterations().values().stream()
+                .filter(it -> it.getStatus() != ExecutionStatus.PASSED)
+                .map(it -> "Iteration #" + it.getIterationIndex() + " (" + it.getStatus() + "): " + nullSafe(it.getComment()))
+                .collect(Collectors.joining("\n"));
+        if (problems.isEmpty()) {
+            return "All iterations passed.";
+        }
+        return problems;
+    }
+
+    private static String nullSafe(String s) {
+        return s == null ? "" : s;
+    }
+}
+
+
+
+
+public final class ExecutionContext {
+
+    private static final ThreadLocal<ExecutionContext> CTX =
+            ThreadLocal.withInitial(ExecutionContext::new);
+
+    private String testCaseId;
+    private String testCaseName;
+    private int iterationIndex; // 1-based
+    private String stepId;
+    private String stepName;
+
+    private ExecutionContext() {}
+
+    public static ExecutionContext get() {
+        return CTX.get();
+    }
+
+    public static void reset() {
+        CTX.remove();
+    }
+
+    public String getTestCaseId() { return testCaseId; }
+    public String getTestCaseName() { return testCaseName; }
+    public int getIterationIndex() { return iterationIndex; }
+    public String getStepId() { return stepId; }
+    public String getStepName() { return stepName; }
+
+    public void setTestCase(String id, String name) {
+        this.testCaseId = id;
+        this.testCaseName = name;
+    }
+
+    public void setIterationIndex(int idx) {
+        this.iterationIndex = idx;
+    }
+
+    public void setStep(String id, String name) {
+        this.stepId = id;
+        this.stepName = name;
+    }
+}
+
+
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+public final class ResultTracker {
+
+    private static final ResultTracker INSTANCE = new ResultTracker();
+
+    private final Map<String, TestCaseRecord> testCases = new ConcurrentHashMap<>();
+
+    private ResultTracker() {}
+
+    private static ResultTracker inst() {
+        return INSTANCE;
+    }
+
+    // --------- Lifecycle from your runner / framework ---------
+
+    public static void startTestCase(String testCaseId, String testCaseName) {
+        ExecutionContext ctx = ExecutionContext.get();
+        ctx.setTestCase(testCaseId, testCaseName);
+
+        inst().testCases.computeIfAbsent(testCaseId,
+                id -> new TestCaseRecord(testCaseId, testCaseName));
+    }
+
+    public static void startIteration(int iterationIndex) {
+        ExecutionContext ctx = ExecutionContext.get();
+        ctx.setIterationIndex(iterationIndex);
+
+        TestCaseRecord tc = inst().requireTestCase(ctx.getTestCaseId());
+        tc.getIterations().computeIfAbsent(iterationIndex,
+                idx -> new IterationRecord(iterationIndex));
+    }
+
+    public static void startStep(String stepId, String stepName) {
+        ExecutionContext ctx = ExecutionContext.get();
+        ctx.setStep(stepId, stepName);
+
+        TestCaseRecord tc = inst().requireTestCase(ctx.getTestCaseId());
+        IterationRecord it = inst().requireIteration(tc, ctx.getIterationIndex());
+
+        it.getSteps().computeIfAbsent(stepId,
+                id -> new StepRecord(stepId, stepName));
+    }
+
+    // --------- Checkpoint recording (STATIC, no object passing) ---------
+
+    public static void checkpointPass(String checkpointId,
+                                      String description,
+                                      String comment) {
+        recordCheckpoint(checkpointId, description,
+                ExecutionStatus.PASSED, "PASS: " + comment, null);
+    }
+
+    public static void checkpointFail(String checkpointId,
+                                      String description,
+                                      String comment,
+                                      String details) {
+        recordCheckpoint(checkpointId, description,
+                ExecutionStatus.FAILED, "FAIL: " + comment, details);
+    }
+
+    public static void checkpointBlocked(String checkpointId,
+                                         String description,
+                                         String comment) {
+        recordCheckpoint(checkpointId, description,
+                ExecutionStatus.BLOCKED, "BLOCKED: " + comment, null);
+    }
+
+    private static void recordCheckpoint(String id,
+                                         String description,
+                                         ExecutionStatus status,
+                                         String comment,
+                                         String details) {
+
+        ExecutionContext ctx = ExecutionContext.get();
+
+        TestCaseRecord tc = inst().requireTestCase(ctx.getTestCaseId());
+        IterationRecord it = inst().requireIteration(tc, ctx.getIterationIndex());
+        StepRecord step = inst().requireStep(it, ctx.getStepId(), ctx.getStepName());
+
+        CheckpointRecord cp = new CheckpointRecord(id, description);
+        cp.mark(status, comment, details);
+        step.addCheckpoint(cp);
+
+        // Re-evaluate step, iteration, testcase on each checkpoint
+        inst().evaluateStep(step);
+        inst().evaluateIteration(it);
+        inst().evaluateTestCase(tc);
+    }
+
+    // --------- Evaluation helpers ---------
+
+    private void evaluateStep(StepRecord step) {
+        ExecutionStatus status = ResultAggregator.aggregateCheckpointStatuses(step.getCheckpoints());
+        step.setStatus(status);
+        step.setComment(ResultAggregator.buildStepComment(step));
+    }
+
+    private void evaluateIteration(IterationRecord it) {
+        ExecutionStatus status = ResultAggregator.aggregateStepStatuses(it.getSteps().values());
+        it.setStatus(status);
+        it.setComment(ResultAggregator.buildIterationComment(it));
+    }
+
+    private void evaluateTestCase(TestCaseRecord tc) {
+        ExecutionStatus status = ResultAggregator.aggregateIterationStatuses(tc.getIterations().values());
+        tc.setStatus(status);
+        tc.setComment(ResultAggregator.buildTestCaseComment(tc));
+    }
+
+    // --------- Lookup helpers ---------
+
+    private TestCaseRecord requireTestCase(String id) {
+        TestCaseRecord tc = testCases.get(id);
+        if (tc == null) {
+            throw new IllegalStateException("TestCaseRecord not started for id=" + id);
+        }
+        return tc;
+    }
+
+    private IterationRecord requireIteration(TestCaseRecord tc, int idx) {
+        IterationRecord it = tc.getIterations().get(idx);
+        if (it == null) {
+            throw new IllegalStateException("Iteration not started for " + tc.getTestCaseId() + " idx=" + idx);
+        }
+        return it;
+    }
+
+    private StepRecord requireStep(IterationRecord it, String stepId, String stepName) {
+        StepRecord step = it.getSteps().get(stepId);
+        if (step == null) {
+            step = new StepRecord(stepId, stepName);
+            it.getSteps().put(stepId, step);
+        }
+        return step;
+    }
+
+    // --------- Public getters for summary / Azure DevOps ---------
+
+    public static TestCaseRecord getTestCaseRecord(String testCaseId) {
+        return inst().testCases.get(testCaseId);
+    }
+
+    public static Map<String, TestCaseRecord> getAllTestCaseRecords() {
+        return inst().testCases;
+    }
+
+    public static ExecutionStatus getCurrentStepStatus() {
+        ExecutionContext ctx = ExecutionContext.get();
+        TestCaseRecord tc = inst().requireTestCase(ctx.getTestCaseId());
+        IterationRecord it = inst().requireIteration(tc, ctx.getIterationIndex());
+        StepRecord step = inst().requireStep(it, ctx.getStepId(), ctx.getStepName());
+        return step.getStatus();
+    }
+
+    public static ExecutionStatus getCurrentIterationStatus() {
+        ExecutionContext ctx = ExecutionContext.get();
+        TestCaseRecord tc = inst().requireTestCase(ctx.getTestCaseId());
+        IterationRecord it = inst().requireIteration(tc, ctx.getIterationIndex());
+        return it.getStatus();
+    }
+
+    public static ExecutionStatus getCurrentTestCaseStatus() {
+        ExecutionContext ctx = ExecutionContext.get();
+        TestCaseRecord tc = inst().requireTestCase(ctx.getTestCaseId());
+        return tc.getStatus();
+    }
+}
+
+
+for (TestCase tc : allTestCases) {
+    // start test case
+    ResultTracker.startTestCase(tc.getId(), tc.getName());
+
+    int iterationIndex = 1;
+    for (DataRow data : tc.getDataRows()) {
+        ResultTracker.startIteration(iterationIndex);
+
+        for (TestStep step : tc.getSteps()) {
+            ResultTracker.startStep(step.getId(), step.getName());
+
+            // inside this step's implementation:
+            // Example checkpoints:
+            boolean apiOk = callApi();
+            if (apiOk) {
+                ResultTracker.checkpointPass("API-001", "Verify /login 200 OK",
+                        "HTTP 200 received for user " + data.getUser());
+            } else {
+                ResultTracker.checkpointFail("API-001", "Verify /login 200 OK",
+                        "Unexpected HTTP status", "HTTP 500 for user " + data.getUser());
+            }
+
+            boolean dbOk = validateDb();
+            if (dbOk) {
+                ResultTracker.checkpointPass("DB-001", "Verify balance updated",
+                        "Balance updated correctly");
+            } else {
+                ResultTracker.checkpointFail("DB-001", "Verify balance updated",
+                        "Balance not updated", "Expected 100, got 90");
+            }
+
+            // At this moment:
+            // - StepRecord has all checkpoint info, status, comment
+            // - IterationRecord updated
+            // - TestCaseRecord updated
+        }
+
+        iterationIndex++;
+    }
+
+    // Now you can get final testcase record for Azure DevOps
+    TestCaseRecord record = ResultTracker.getTestCaseRecord(tc.getId());
+    String outcome = AzureStatusMapper.toAzureOutcome(record.getStatus());
+    String comment = record.getComment(); // includes iteration-level remarks
+}
+
+
+
+
+
+
+
