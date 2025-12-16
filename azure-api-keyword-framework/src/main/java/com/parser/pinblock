@@ -1,0 +1,136 @@
+import javax.crypto.Cipher;
+import javax.crypto.spec.SecretKeySpec;
+import java.security.Security;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import javax.xml.bind.DatatypeConverter; // For Java 8 and earlier
+
+public class PinBlockGenerator {
+
+    // Helper method to convert Hexadecimal string to byte array
+    public static byte[] hexStringToByteArray(String s) {
+        int len = s.length();
+        byte[] data = new byte[len / 2];
+        for (int i = 0; i < len; i += 2) {
+            data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4)
+                                 + Character.digit(s.charAt(i+1), 16));
+        }
+        return data;
+    }
+
+    // Helper method to convert byte array to Hexadecimal string
+    public static String byteArrayToHexString(byte[] bytes) {
+        // For Java 11+, you can use javax.xml.bind.DatatypeConverter.printHexBinary(bytes)
+        // or new String(Hex.encode(bytes)) with BouncyCastle
+        return DatatypeConverter.printHexBinary(bytes);
+    }
+
+    /**
+     * Combines two key components using XOR to form the final key.
+     * @param component1 Hex string of key component 1
+     * @param component2 Hex string of key component 2
+     * @return Combined key as a byte array
+     */
+    public static byte[] combineKeyComponents(String component1, String component2) {
+        byte[] keyBytes1 = hexStringToByteArray(component1);
+        byte[] keyBytes2 = hexStringToByteArray(component2);
+
+        if (keyBytes1.length != keyBytes2.length) {
+            throw new IllegalArgumentException("Key components must be of the same length");
+        }
+
+        byte[] combinedKey = new byte[keyBytes1.length];
+        for (int i = 0; i < keyBytes1.length; i++) {
+            combinedKey[i] = (byte) (keyBytes1[i] ^ keyBytes2[i]);
+        }
+        return combinedKey;
+    }
+
+    /**
+     * Generates a clear ISO 9564-1 Format 0 PIN block (16 bytes/32 hex digits).
+     * @param pin The PIN as a string (4-12 digits)
+     * @param pan The Primary Account Number as a string (rightmost 12 digits excluding check digit)
+     * @return Clear PIN block as a byte array
+     */
+    public static byte[] generateClearPinBlock(String pin, String pan) {
+        // 1. Build PIN block part 1 (P1): 0LPP...FFFFFFFFFF
+        String p1Str = "0" + pin.length() + pin;
+        p1Str = String.format("%-16s", p1Str).replace(' ', 'F');
+        
+        // 2. Build PAN block part 2 (P2): 0000CCCCCCCCCCCC
+        String panPart = pan.substring(pan.length() - 12); // Rightmost 12 digits, excluding check digit
+        String p2Str = "0000" + panPart;
+
+        byte[] p1Bytes = hexStringToByteArray(p1Str);
+        byte[] p2Bytes = hexStringToByteArray(p2Str);
+
+        // 3. XOR P1 and P2
+        byte[] clearPinBlock = new byte[8]; // PIN blocks are 8 bytes (16 nibbles)
+        for (int i = 0; i < 8; i++) {
+            clearPinBlock[i] = (byte) (p1Bytes[i] ^ p2Bytes[i]);
+        }
+        
+        System.out.println("Clear PIN Block (Hex): " + byteArrayToHexString(clearPinBlock));
+        return clearPinBlock;
+    }
+
+    /**
+     * Encrypts the clear PIN block using 3DES in ECB mode.
+     * @param clearPinBlock The unencrypted PIN block
+     * @param key The combined encryption key
+     * @return Encrypted PIN block as a hex string
+     */
+    public static String encryptPinBlock(byte[] clearPinBlock, byte[] key) throws Exception {
+        // Use BouncyCastle provider for handling 2-component 3DES keys if needed,
+        // although standard JCE often supports it if key length is correct (16 or 24 bytes).
+        Security.addProvider(new BouncyCastleProvider()); 
+        
+        // Ensure the key is suitable for 3DES. A 16-byte key implies TDES EDE2 (two keys).
+        SecretKeySpec secretKey = new SecretKeySpec(key, "DESede");
+        
+        // Use 3DES in Electronic Codebook (ECB) mode with No Padding
+        Cipher cipher = Cipher.getInstance("DESede/ECB/NoPadding", "BC");
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey);
+
+        byte[] encryptedPinBlock = cipher.doFinal(clearPinBlock);
+        return byteArrayToHexString(encryptedPinBlock);
+    }
+
+    public static void main(String[] args) {
+        // --- Input Data (Example values - replace with your actual data) ---
+        String component1 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 32-digit hex
+        String component2 = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"; // 32-digit hex
+        String pin = "1234"; 
+        String pan = "4000001234569002"; // Full PAN
+
+        // NOTE: KCV (Key Check Value) is used for key verification purposes
+        // and not directly in the PIN block generation logic itself.
+
+        try {
+            // Step 1: Combine the two key components
+            byte[] combinedKey = combineKeyComponents(component1, component2);
+            System.out.println("Combined Key (Hex): " + byteArrayToHexString(combinedKey));
+
+            // Step 2: Generate the clear PIN block (ISO Format 0)
+            // We use the rightmost 12 digits of the PAN, excluding the check digit: 000123456900
+            byte[] clearPinBlock = generateClearPinBlock(pin, pan);
+            
+            // Step 3: Encrypt the clear PIN block using the combined key
+            String encryptedPinBlock = encryptPinBlock(clearPinBlock, combinedKey);
+            System.out.println("Encrypted PIN Block (Hex): " + encryptedPinBlock);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+-------------
+
+<dependency>
+    <groupId>org.bouncycastle</groupId>
+    <artifactId>bcprov-jdk15on</artifactId>
+    <version>1.70</version> <!-- Use a recent version -->
+</dependency>
+
+
+
