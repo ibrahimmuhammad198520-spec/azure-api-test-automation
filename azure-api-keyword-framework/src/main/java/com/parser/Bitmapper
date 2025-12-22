@@ -1,0 +1,126 @@
+import com.fasterxml.jackson.databind.*;
+import org.jpos.iso.*;
+import org.jpos.iso.packager.ISO87BPackager;
+
+import java.nio.ByteBuffer;
+import java.util.Iterator;
+import java.util.Map;
+
+public class Iso87bJsonParser {
+
+  public enum EnvelopeMode {
+    NONE,
+    LEN2_TPDU5,   // [2-byte len][5-byte TPDU][ISO]
+    LEN2_ONLY     // [2-byte len][ISO]
+  }
+
+  public static byte[] jsonToIsoBytes(String json, EnvelopeMode mode) throws Exception {
+    ObjectMapper om = new ObjectMapper();
+    JsonNode root = om.readTree(json);
+
+    String mti = root.path("mti").asText();
+    String tpduHex = root.path("tpdu").asText(""); // optional
+    JsonNode fieldsNode = root.path("fields");
+
+    ISOMsg msg = new ISOMsg();
+    msg.setPackager(new ISO87BPackager());
+    msg.setMTI(mti);
+
+    // Set fields
+    Iterator<Map.Entry<String, JsonNode>> it = fieldsNode.fields();
+    while (it.hasNext()) {
+      Map.Entry<String, JsonNode> e = it.next();
+      String key = e.getKey();
+      String value = e.getValue().asText("");
+
+      boolean isHex = key.endsWith("@hex");
+      int de = Integer.parseInt(isHex ? key.substring(0, key.indexOf("@")) : key);
+
+      if (isHex) {
+        msg.set(new ISOBinaryField(de, hexToBytes(value)));
+      } else {
+        msg.set(de, value);
+      }
+    }
+
+    byte[] iso = msg.pack();
+
+    // Envelope/wrapper
+    switch (mode) {
+      case NONE:
+        return iso;
+
+      case LEN2_ONLY:
+        return with2ByteLen(iso);
+
+      case LEN2_TPDU5:
+        if (tpduHex.isEmpty()) {
+          throw new IllegalArgumentException("tpdu is required for LEN2_TPDU5 mode");
+        }
+        byte[] tpdu = hexToBytes(tpduHex);
+        if (tpdu.length != 5) {
+          throw new IllegalArgumentException("TPDU must be 5 bytes (10 hex chars)");
+        }
+        return with2ByteLen(concat(tpdu, iso));
+
+      default:
+        throw new IllegalStateException("Unknown envelope mode");
+    }
+  }
+
+  private static byte[] with2ByteLen(byte[] body) {
+    ByteBuffer bb = ByteBuffer.allocate(2 + body.length);
+    bb.putShort((short) body.length); // big-endian binary length (most common)
+    bb.put(body);
+    return bb.array();
+  }
+
+  private static byte[] concat(byte[] a, byte[] b) {
+    byte[] out = new byte[a.length + b.length];
+    System.arraycopy(a, 0, out, 0, a.length);
+    System.arraycopy(b, 0, out, a.length, b.length);
+    return out;
+  }
+
+  private static byte[] hexToBytes(String hex) {
+    hex = hex.replaceAll("\\s+", "");
+    if (hex.length() % 2 != 0) throw new IllegalArgumentException("Invalid hex length");
+    byte[] out = new byte[hex.length() / 2];
+    for (int i = 0; i < out.length; i++) {
+      int hi = Character.digit(hex.charAt(i * 2), 16);
+      int lo = Character.digit(hex.charAt(i * 2 + 1), 16);
+      if (hi < 0 || lo < 0) throw new IllegalArgumentException("Invalid hex");
+      out[i] = (byte) ((hi << 4) | lo);
+    }
+    return out;
+  }
+}
+
+
+byte[] rawIso = Iso87bJsonParser.jsonToIsoBytes(json, Iso87bJsonParser.EnvelopeMode.NONE);
+
+byte[] hypercom = Iso87bJsonParser.jsonToIsoBytes(
+  json,
+  Iso87bJsonParser.EnvelopeMode.LEN2_TPDU5
+);
+
+
+
+
+{
+  "mti": "0200",
+  "tpdu": "6001500000",
+  "fields": {
+    "2": "4111111111111111",
+    "3": "000000",
+    "4": "000000001000",
+    "7": "1222220000",
+    "11": "123456",
+    "41": "TERM0001",
+    "49": "634",
+    "52@hex": "041234FFFFFFFFFF",
+    "55@hex": "9F2608A1B2C3D4E5F607..."
+  }
+}
+
+
