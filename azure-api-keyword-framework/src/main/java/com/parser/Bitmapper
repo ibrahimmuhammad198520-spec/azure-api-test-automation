@@ -123,4 +123,244 @@ byte[] hypercom = Iso87bJsonParser.jsonToIsoBytes(
   }
 }
 
+=======================================
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.jpos.iso.ISOBinaryField;
+import org.jpos.iso.ISOMsg;
+import org.jpos.iso.ISOUtil;
+import org.jpos.iso.packager.ISO87BPackager;
+
+import java.io.DataInputStream;
+import java.io.EOFException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.Map;
+
+public class Iso87bSocketClient {
+
+  // --------- CONFIG: choose your envelope ----------
+  enum Envelope {
+    ISO_ONLY,          // [ISO]
+    LEN2_ISO,          // [2-byte len][ISO]
+    LEN2_TPDU5_ISO,    // [2-byte len][TPDU 5][ISO]
+    LEN2_HDR8_ISO      // [2-byte len][HDR 8][ISO]
+  }
+
+  public static void main(String[] args) throws Exception {
+    // ---- Change these ----
+    String host = "10.1.15.209";
+    int port = 4003;
+
+    // Your request JSON (example)
+    String json = "{\n" +
+      "  \"mti\":\"0200\",\n" +
+      "  \"tpdu\":\"6001500000\",\n" +               // required if using LEN2_TPDU5_ISO
+      "  \"hdr8\":\"2349690001070101\",\n" +         // required if using LEN2_HDR8_ISO
+      "  \"fields\":{\n" +
+      "    \"3\":\"000000\",\n" +
+      "    \"4\":\"000000001000\",\n" +
+      "    \"11\":\"123456\",\n" +
+      "    \"22\":\"071\",\n" +
+      "    \"41\":\"TERM0001\",\n" +
+      "    \"49\":\"634\",\n" +                      // Currency code (N3). In ISO87B it becomes 2 bytes on wire.
+      "    \"55@hex\":\"9F2608A1B2C3D4E5F607\"\n" +   // example EMV (binary)
+      "  }\n" +
+      "}";
+
+    // Choose envelope for REQUEST and RESPONSE (these must match what your server expects)
+    Envelope requestEnv  = Envelope.LEN2_TPDU5_ISO;
+    Envelope responseEnv = Envelope.LEN2_TPDU5_ISO;
+
+    ISOMsg response = sendAndReceiveIso87b(host, port, json, requestEnv, responseEnv);
+
+    System.out.println("\n===== Parsed Response =====");
+    response.dump(System.out, "");
+
+    System.out.println("MTI  = " + response.getMTI());
+    System.out.println("DE39 = " + response.getString(39));
+    System.out.println("DE49 = " + response.getString(49));
+  }
+
+  // ===================== PUBLIC: socket + parser =====================
+  public static ISOMsg sendAndReceiveIso87b(
+    String host,
+    int port,
+    String requestJson,
+    Envelope requestEnvelope,
+    Envelope responseEnvelope
+  ) throws Exception {
+
+    byte[] requestFrame = buildRequestFrameFromJson(requestJson, requestEnvelope);
+
+    try (Socket socket = new Socket(host, port)) {
+      socket.setSoTimeout(20000);
+
+      OutputStream out = socket.getOutputStream();
+      InputStream in = socket.getInputStream();
+
+      // Send
+      System.out.println("===== Sending Request Frame =====");
+      System.out.println(ISOUtil.hexdump(requestFrame));
+      out.write(requestFrame);
+      out.flush();
+
+      // Receive + Parse
+      return readAndParseResponseIso87b(in, responseEnvelope);
+    }
+  }
+
+  // ===================== BUILD REQUEST =====================
+  private static byte[] buildRequestFrameFromJson(String json, Envelope envelope) throws Exception {
+    ObjectMapper om = new ObjectMapper();
+    JsonNode root = om.readTree(json);
+
+    String mti = root.path("mti").asText();
+    JsonNode fieldsNode = root.path("fields");
+
+    // 1) Build ISO87B (MTI + bitmap + fields)
+    ISOMsg msg = new ISOMsg();
+    msg.setPackager(new ISO87BPackager());
+    msg.setMTI(mti);
+
+    Iterator<Map.Entry<String, JsonNode>> it = fieldsNode.fields();
+    while (it.hasNext()) {
+      Map.Entry<String, JsonNode> e = it.next();
+      String key = e.getKey();
+      String value = e.getValue().asText("");
+
+      boolean isHex = key.endsWith("@hex");
+      int de = Integer.parseInt(isHex ? key.substring(0, key.indexOf("@")) : key);
+
+      if (isHex) {
+        msg.set(new ISOBinaryField(de, hexToBytes(value)));
+      } else {
+        msg.set(de, value);
+      }
+    }
+
+    byte[] iso = msg.pack();
+
+    // 2) Wrap with envelope (length + optional headers)
+    switch (envelope) {
+      case ISO_ONLY:
+        return iso;
+
+      case LEN2_ISO:
+        return prepend2ByteLen(iso);
+
+      case LEN2_TPDU5_ISO: {
+        String tpduHex = root.path("tpdu").asText("");
+        if (tpduHex.isEmpty()) throw new IllegalArgumentException("tpdu is required for LEN2_TPDU5_ISO");
+        byte[] tpdu = hexToBytes(tpduHex);
+        if (tpdu.length != 5) throw new IllegalArgumentException("TPDU must be exactly 5 bytes (10 hex chars)");
+        return prepend2ByteLen(concat(tpdu, iso));
+      }
+
+      case LEN2_HDR8_ISO: {
+        String hdr8Hex = root.path("hdr8").asText("");
+        if (hdr8Hex.isEmpty()) throw new IllegalArgumentException("hdr8 is required for LEN2_HDR8_ISO");
+        byte[] hdr8 = hexToBytes(hdr8Hex);
+        if (hdr8.length != 8) throw new IllegalArgumentException("HDR8 must be exactly 8 bytes (16 hex chars)");
+        return prepend2ByteLen(concat(hdr8, iso));
+      }
+
+      default:
+        throw new IllegalStateException("Unknown envelope: " + envelope);
+    }
+  }
+
+  // ===================== READ + PARSE RESPONSE =====================
+  private static ISOMsg readAndParseResponseIso87b(InputStream in, Envelope responseEnvelope) throws Exception {
+    DataInputStream dis = new DataInputStream(in);
+
+    byte[] isoBytes;
+    int headerLenToStrip;
+
+    switch (responseEnvelope) {
+      case ISO_ONLY:
+        // Not reliable for TCP (no framing). If you truly have this, you must implement read-until-timeout.
+        // Provided here only for completeness.
+        throw new IllegalArgumentException("ISO_ONLY response is not supported without framing. Use LEN2_*.");
+
+      case LEN2_ISO:
+        headerLenToStrip = 0;
+        isoBytes = readLen2Body(dis);
+        break;
+
+      case LEN2_TPDU5_ISO:
+        headerLenToStrip = 5;
+        isoBytes = readLen2Body(dis);
+        break;
+
+      case LEN2_HDR8_ISO:
+        headerLenToStrip = 8;
+        isoBytes = readLen2Body(dis);
+        break;
+
+      default:
+        throw new IllegalStateException("Unknown response envelope: " + responseEnvelope);
+    }
+
+    System.out.println("===== Received Payload (len bytes after length) =====");
+    System.out.println(ISOUtil.hexdump(isoBytes));
+
+    if (isoBytes.length < headerLenToStrip) {
+      throw new IllegalArgumentException("Response shorter than headerLenToStrip");
+    }
+
+    // Strip TPDU/HDR so unpack starts at MTI
+    byte[] isoOnly = Arrays.copyOfRange(isoBytes, headerLenToStrip, isoBytes.length);
+
+    ISOMsg resp = new ISOMsg();
+    resp.setPackager(new ISO87BPackager());
+    resp.unpack(isoOnly);
+
+    return resp;
+  }
+
+  // Reads: [2-byte big-endian length][body...]
+  private static byte[] readLen2Body(DataInputStream dis) throws Exception {
+    int len = dis.readUnsignedShort();
+    byte[] body = dis.readNBytes(len);
+    if (body.length != len) {
+      throw new EOFException("Incomplete response. Expected " + len + " bytes, got " + body.length);
+    }
+    return body;
+  }
+
+  // ===================== UTIL =====================
+  private static byte[] prepend2ByteLen(byte[] body) {
+    ByteBuffer bb = ByteBuffer.allocate(2 + body.length);
+    bb.putShort((short) body.length);   // big-endian binary length (common)
+    bb.put(body);
+    return bb.array();
+  }
+
+  private static byte[] concat(byte[] a, byte[] b) {
+    byte[] out = new byte[a.length + b.length];
+    System.arraycopy(a, 0, out, 0, a.length);
+    System.arraycopy(b, 0, out, a.length, b.length);
+    return out;
+  }
+
+  private static byte[] hexToBytes(String hex) {
+    hex = hex.replaceAll("\\s+", "");
+    if (hex.length() % 2 != 0) throw new IllegalArgumentException("Invalid hex length");
+    byte[] out = new byte[hex.length() / 2];
+    for (int i = 0; i < out.length; i++) {
+      int hi = Character.digit(hex.charAt(i * 2), 16);
+      int lo = Character.digit(hex.charAt(i * 2 + 1), 16);
+      if (hi < 0 || lo < 0) throw new IllegalArgumentException("Invalid hex char");
+      out[i] = (byte) ((hi << 4) | lo);
+    }
+    return out;
+  }
+}
+
 
