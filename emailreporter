@@ -1,0 +1,687 @@
+package com.automation.reporting;
+
+import org.jfree.chart.*;
+import org.jfree.chart.plot.*;
+import org.jfree.data.general.DefaultPieDataset;
+import org.testng.*;
+import org.testng.xml.XmlSuite;
+
+import javax.activation.DataHandler;
+import javax.activation.DataSource;
+import javax.activation.FileDataSource;
+import javax.mail.*;
+import javax.mail.internet.*;
+import java.awt.*;
+import java.io.*;
+import java.text.DecimalFormat;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.List;
+
+/**
+ * ╔═══════════════════════════════════════════════════════════════════════════╗
+ * ║  CUSTOMIZED EMAIL REPORTER - User Controlled Data                         ║
+ * ║  Version 2.0 - Simplified with Custom Data Methods                        ║
+ * ╚═══════════════════════════════════════════════════════════════════════════╝
+ * 
+ * NEW FEATURES:
+ * ✅ Method to set test counts (pass, fail, skip)
+ * ✅ Method to add failed test details
+ * ✅ Method to attach HTML report
+ * ✅ Simplified - Only Pie Chart
+ * ✅ No module/trend/slowest charts
+ * ✅ No key insights section
+ * 
+ * USAGE EXAMPLE:
+ * ==============
+ * EmailReporter reporter = new EmailReporter();
+ * 
+ * // Set test counts
+ * reporter.setTestCounts(45, 3, 2);
+ * 
+ * // Add failed tests
+ * reporter.addFailedTest("testLogin", "FAILED", "Element not found");
+ * reporter.addFailedTest("testCheckout", "FAILED", "Timeout exception");
+ * 
+ * // Attach HTML report (optional)
+ * reporter.attachHtmlReport("test-output/extent-report.html");
+ * 
+ * // Send email
+ * reporter.sendReport();
+ */
+public class EmailReporter implements IReporter {
+
+    // ╔═══════════════════════════════════════════════════════════════════════╗
+    // ║                         CONFIGURATION SECTION                          ║
+    // ║                    👇 UPDATE THESE VALUES 👇                          ║
+    // ╚═══════════════════════════════════════════════════════════════════════╝
+    
+    // SMTP Server Configuration - GMAIL EXAMPLE
+    private static final String SMTP_HOST = "smtp.gmail.com";
+    private static final String SMTP_PORT = "587";
+    private static final String SMTP_USERNAME = "yourname@gmail.com";
+    private static final String SMTP_PASSWORD = "abcdefghijklmnop";
+    
+    // Email Details
+    private static final String FROM_EMAIL = "yourname@gmail.com";
+    private static final String FROM_NAME = "Test Automation Team";
+    private static final String[] TO_EMAILS = {
+        "recipient@company.com",
+        "yourname@gmail.com"
+    };
+    private static final String[] CC_EMAILS = {};
+    
+    // Report Configuration
+    private static final String CHART_OUTPUT_DIR = "test-output/charts/";
+    private static final String REPORT_TITLE = "Test Automation Report";
+    private static final boolean SEND_ONLY_ON_FAILURE = false;
+    
+    // ╔═══════════════════════════════════════════════════════════════════════╗
+    // ║                    END OF CONFIGURATION SECTION                        ║
+    // ╚═══════════════════════════════════════════════════════════════════════╝
+
+    private static final DecimalFormat DECIMAL_FORMAT = new DecimalFormat("#.##");
+    private CustomTestResults testResults;
+    private String htmlReportPath = null;
+
+    public EmailReporter() {
+        this.testResults = new CustomTestResults();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //                    PUBLIC API METHODS - USE THESE
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Set test execution counts
+     * 
+     * @param passedCount Number of passed tests
+     * @param failedCount Number of failed tests
+     * @param skippedCount Number of skipped tests
+     * 
+     * Example:
+     *   reporter.setTestCounts(45, 3, 2);
+     */
+    public void setTestCounts(int passedCount, int failedCount, int skippedCount) {
+        testResults.passedCount = passedCount;
+        testResults.failedCount = failedCount;
+        testResults.skippedCount = skippedCount;
+        testResults.totalCount = passedCount + failedCount + skippedCount;
+        testResults.passPercentage = (testResults.totalCount > 0) ? 
+            (passedCount * 100.0 / testResults.totalCount) : 0;
+    }
+
+    /**
+     * Add a failed test to the report
+     * 
+     * @param testName Name of the test
+     * @param testStatus Status (e.g., "FAILED", "ERROR")
+     * @param failureReason Reason for failure
+     * 
+     * Example:
+     *   reporter.addFailedTest("testLoginWithInvalidCredentials", "FAILED", 
+     *                          "AssertionError: Expected error message not displayed");
+     */
+    public void addFailedTest(String testName, String testStatus, String failureReason) {
+        testResults.failedTests.add(new FailedTestDetail(testName, testStatus, failureReason));
+    }
+
+    /**
+     * Add a failed test from your custom object
+     * Use this if you have your own test result object with getter methods
+     * 
+     * @param testObject Your custom object with getTestName(), getTestStatus(), getFailureReason()
+     * 
+     * Example:
+     *   List<MyTestResult> failedTests = getFailedTests();
+     *   for (MyTestResult test : failedTests) {
+     *       reporter.addFailedTestFromObject(test);
+     *   }
+     */
+    public void addFailedTestFromObject(Object testObject) {
+        try {
+            String testName = (String) testObject.getClass().getMethod("getTestName").invoke(testObject);
+            String testStatus = (String) testObject.getClass().getMethod("getTestStatus").invoke(testObject);
+            String failureReason = (String) testObject.getClass().getMethod("getFailureReason").invoke(testObject);
+            
+            addFailedTest(testName, testStatus, failureReason);
+        } catch (Exception e) {
+            System.err.println("Error extracting test data from object: " + e.getMessage());
+            System.err.println("Make sure your object has getTestName(), getTestStatus(), and getFailureReason() methods");
+        }
+    }
+
+    /**
+     * Add multiple failed tests from a list of objects
+     * 
+     * @param failedTestObjects List of your custom test result objects
+     * 
+     * Example:
+     *   List<MyTestResult> failedTests = getFailedTests();
+     *   reporter.addFailedTestsFromList(failedTests);
+     */
+    public void addFailedTestsFromList(List<?> failedTestObjects) {
+        if (failedTestObjects == null || failedTestObjects.isEmpty()) {
+            return;
+        }
+        
+        for (Object testObj : failedTestObjects) {
+            addFailedTestFromObject(testObj);
+        }
+    }
+
+    /**
+     * Attach an HTML report file to the email
+     * 
+     * @param reportFilePath Path to the HTML report file
+     * 
+     * Example:
+     *   reporter.attachHtmlReport("test-output/extent-report.html");
+     *   reporter.attachHtmlReport("C:/reports/TestReport.html");
+     */
+    public void attachHtmlReport(String reportFilePath) {
+        File reportFile = new File(reportFilePath);
+        if (!reportFile.exists()) {
+            System.err.println("⚠️  Warning: HTML report file not found: " + reportFilePath);
+            return;
+        }
+        this.htmlReportPath = reportFilePath;
+        System.out.println("✓ HTML report attached: " + reportFilePath);
+    }
+
+    /**
+     * Set suite name and execution duration
+     * 
+     * @param suiteName Name of the test suite
+     * @param durationMillis Execution duration in milliseconds
+     * 
+     * Example:
+     *   reporter.setSuiteInfo("Regression Suite", 125000);
+     */
+    public void setSuiteInfo(String suiteName, long durationMillis) {
+        testResults.suiteName = suiteName;
+        testResults.totalDuration = durationMillis;
+    }
+
+    /**
+     * Send the email report
+     * Call this after setting all data
+     * 
+     * Example:
+     *   reporter.setTestCounts(45, 3, 2);
+     *   reporter.addFailedTest("test1", "FAILED", "reason");
+     *   reporter.sendReport();
+     */
+    public void sendReport() {
+        try {
+            testResults.timestamp = new Date();
+            generateAndSendEmail();
+        } catch (Exception e) {
+            System.err.println("❌ Error sending email report: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //                    TESTNG LISTENER IMPLEMENTATION
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Override
+    public void generateReport(List<XmlSuite> xmlSuites, List<ISuite> suites, String outputDirectory) {
+        try {
+            String separator = "======================================================================";
+            System.out.println("\n" + separator);
+            System.out.println("📧 GENERATING EMAIL REPORT");
+            System.out.println(separator);
+            
+            // Auto-collect test results from TestNG
+            collectTestResultsFromTestNG(suites);
+            
+            // Check if we should send email
+            if (SEND_ONLY_ON_FAILURE && testResults.failedCount == 0) {
+                System.out.println("✅ All tests passed. Email not sent (SEND_ONLY_ON_FAILURE = true)");
+                return;
+            }
+            
+            generateAndSendEmail();
+            
+            System.out.println("✅ Email report sent successfully!");
+            System.out.println(separator + "\n");
+            
+        } catch (Exception e) {
+            System.err.println("❌ ERROR: Failed to generate/send email report");
+            e.printStackTrace();
+        }
+    }
+
+    private void collectTestResultsFromTestNG(List<ISuite> suites) {
+        int passed = 0, failed = 0, skipped = 0;
+        long duration = 0;
+        String suiteName = "Test Suite";
+        
+        for (ISuite suite : suites) {
+            suiteName = suite.getName();
+            Map<String, ISuiteResult> suiteResults = suite.getResults();
+            
+            for (ISuiteResult suiteResult : suiteResults.values()) {
+                ITestContext testContext = suiteResult.getTestContext();
+                
+                passed += testContext.getPassedTests().size();
+                failed += testContext.getFailedTests().size();
+                skipped += testContext.getSkippedTests().size();
+                
+                duration += testContext.getEndDate().getTime() - testContext.getStartDate().getTime();
+                
+                // Collect failed test details
+                for (ITestResult failedTest : testContext.getFailedTests().getAllResults()) {
+                    String failureReason = "Unknown Error";
+                    if (failedTest.getThrowable() != null) {
+                        failureReason = failedTest.getThrowable().getClass().getSimpleName() + ": " +
+                            failedTest.getThrowable().getMessage();
+                        if (failureReason.length() > 150) {
+                            failureReason = failureReason.substring(0, 150) + "...";
+                        }
+                    }
+                    addFailedTest(failedTest.getName(), "FAILED", failureReason);
+                }
+            }
+        }
+        
+        setTestCounts(passed, failed, skipped);
+        setSuiteInfo(suiteName, duration);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //                      INTERNAL EMAIL GENERATION
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private void generateAndSendEmail() throws Exception {
+        // Create charts directory
+        new File(CHART_OUTPUT_DIR).mkdirs();
+        
+        // Generate only pie chart
+        System.out.println("📊 Generating chart...");
+        String pieChartPath = generatePieChart();
+        
+        // Generate HTML email content
+        System.out.println("📝 Generating HTML content...");
+        String htmlContent = generateHtmlEmailContent(pieChartPath);
+        
+        // Send email
+        System.out.println("📤 Sending email...");
+        sendEmailWithAttachments(htmlContent, pieChartPath);
+    }
+
+    private String generatePieChart() throws IOException {
+        DefaultPieDataset dataset = new DefaultPieDataset();
+        dataset.setValue("Passed (" + testResults.passedCount + ")", testResults.passedCount);
+        dataset.setValue("Failed (" + testResults.failedCount + ")", testResults.failedCount);
+        dataset.setValue("Skipped (" + testResults.skippedCount + ")", testResults.skippedCount);
+        
+        JFreeChart chart = ChartFactory.createPieChart(
+            "Test Results Distribution", dataset, true, true, false);
+        
+        PiePlot plot = (PiePlot) chart.getPlot();
+        plot.setSectionPaint("Passed (" + testResults.passedCount + ")", new Color(76, 175, 80));
+        plot.setSectionPaint("Failed (" + testResults.failedCount + ")", new Color(244, 67, 54));
+        plot.setSectionPaint("Skipped (" + testResults.skippedCount + ")", new Color(255, 152, 0));
+        plot.setBackgroundPaint(Color.WHITE);
+        plot.setLabelFont(new Font("Arial", Font.BOLD, 12));
+        chart.setBackgroundPaint(Color.WHITE);
+        
+        String fileName = CHART_OUTPUT_DIR + "pie_chart.png";
+        ChartUtils.saveChartAsPNG(new File(fileName), chart, 600, 450);
+        return fileName;
+    }
+
+    private String generateHtmlEmailContent(String pieChartPath) {
+        StringBuilder html = new StringBuilder();
+        
+        String overallStatus = testResults.failedCount == 0 ? "✅ PASSED" : "❌ FAILED";
+        String statusColor = testResults.failedCount == 0 ? "#4CAF50" : "#f44336";
+        
+        html.append("<!DOCTYPE html><html><head>");
+        html.append("<meta charset='UTF-8'>");
+        html.append("<meta name='viewport' content='width=device-width, initial-scale=1.0'>");
+        html.append("<style>").append(getEmailStyles()).append("</style>");
+        html.append("</head><body>");
+        
+        html.append("<div class='container'>");
+        
+        // Header
+        html.append("<div class='header'>");
+        html.append("<h1>📊 ").append(REPORT_TITLE).append("</h1>");
+        html.append("<p class='suite-name'>").append(testResults.suiteName).append("</p>");
+        html.append("<p class='timestamp'>").append(formatTimestamp(testResults.timestamp)).append("</p>");
+        html.append("</div>");
+        
+        // Executive Summary
+        html.append("<div class='executive-summary'><h2>Executive Summary</h2>");
+        html.append("<div class='summary-grid'>");
+        
+        html.append("<div class='summary-card'>");
+        html.append("<div class='card-title'>Overall Status</div>");
+        html.append("<div class='card-value' style='color:").append(statusColor).append("'>")
+            .append(overallStatus).append("</div></div>");
+        
+        html.append("<div class='summary-card'>");
+        html.append("<div class='card-title'>Pass Rate</div>");
+        html.append("<div class='card-value pass'>")
+            .append(DECIMAL_FORMAT.format(testResults.passPercentage)).append("%</div></div>");
+        
+        html.append("<div class='summary-card'>");
+        html.append("<div class='card-title'>Total Tests</div>");
+        html.append("<div class='card-value'>").append(testResults.totalCount).append("</div></div>");
+        
+        html.append("<div class='summary-card'>");
+        html.append("<div class='card-title'>Duration</div>");
+        html.append("<div class='card-value'>").append(formatDuration(testResults.totalDuration))
+            .append("</div></div>");
+        
+        html.append("</div></div>");
+        
+        // Statistics Table
+        html.append("<div class='section'><h2>Test Statistics</h2>");
+        html.append("<table class='stats-table'>");
+        html.append("<tr><th>Metric</th><th>Count</th><th>Percentage</th></tr>");
+        
+        html.append("<tr class='pass-row'><td>✅ Passed</td><td>").append(testResults.passedCount)
+            .append("</td><td>").append(DECIMAL_FORMAT.format(testResults.passedCount * 100.0 / testResults.totalCount))
+            .append("%</td></tr>");
+        
+        html.append("<tr class='fail-row'><td>❌ Failed</td><td>").append(testResults.failedCount)
+            .append("</td><td>").append(DECIMAL_FORMAT.format(testResults.failedCount * 100.0 / testResults.totalCount))
+            .append("%</td></tr>");
+        
+        html.append("<tr class='skip-row'><td>⚠️ Skipped</td><td>").append(testResults.skippedCount)
+            .append("</td><td>").append(DECIMAL_FORMAT.format(testResults.skippedCount * 100.0 / testResults.totalCount))
+            .append("%</td></tr>");
+        
+        html.append("<tr class='total-row'><td><strong>Total</strong></td><td><strong>")
+            .append(testResults.totalCount).append("</strong></td><td><strong>100%</strong></td></tr>");
+        
+        html.append("</table></div>");
+        
+        // Pie Chart Only
+        html.append("<div class='section'><h2>Test Results Distribution</h2>");
+        html.append("<div class='chart-center'>");
+        html.append("<img src='cid:pie_chart' alt='Test Distribution' style='max-width:600px; height:auto;'/>");
+        html.append("</div></div>");
+        
+        // Failed Tests Table
+        if (!testResults.failedTests.isEmpty()) {
+            html.append("<div class='section'><h2 style='color:#f44336;'>Failed Tests Breakdown</h2>");
+            html.append("<table class='failure-table'>");
+            html.append("<tr><th>Test Name</th><th>Status</th><th>Failure Reason</th></tr>");
+            
+            for (FailedTestDetail failure : testResults.failedTests) {
+                html.append("<tr>");
+                html.append("<td>").append(escapeHtml(failure.testName)).append("</td>");
+                html.append("<td><span class='status-badge status-").append(failure.testStatus.toLowerCase())
+                    .append("'>").append(failure.testStatus).append("</span></td>");
+                html.append("<td class='failure-reason'>").append(escapeHtml(failure.failureReason)).append("</td>");
+                html.append("</tr>");
+            }
+            
+            html.append("</table></div>");
+        }
+        
+        // Note about attached report
+        if (htmlReportPath != null) {
+            html.append("<div class='section'>");
+            html.append("<h2>📎 Detailed Report</h2>");
+            html.append("<p style='font-size:16px;'>A detailed HTML test report is attached to this email.</p>");
+            html.append("<p style='font-size:14px; color:#666;'>File: ").append(new File(htmlReportPath).getName()).append("</p>");
+            html.append("</div>");
+        }
+        
+        // Footer
+        html.append("<div class='footer'>");
+        html.append("<p>This is an automated email from the Test Automation System.</p>");
+        html.append("<p>Generated on ").append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date()))
+            .append("</p></div>");
+        
+        html.append("</div></body></html>");
+        
+        return html.toString();
+    }
+
+    private String getEmailStyles() {
+        return "body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;margin:0;padding:20px;color:#333}" +
+               ".container{max-width:1000px;margin:0 auto;background:#fff;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1);overflow:hidden}" +
+               ".header{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:30px;text-align:center}" +
+               ".header h1{margin:0;font-size:32px;font-weight:600}" +
+               ".suite-name{font-size:18px;margin:10px 0 5px;opacity:0.9}" +
+               ".timestamp{font-size:14px;margin:5px 0 0;opacity:0.8}" +
+               ".executive-summary{background:linear-gradient(135deg,#f5f7fa 0%,#c3cfe2 100%);padding:30px}" +
+               ".executive-summary h2{margin-top:0;color:#333;font-size:24px;margin-bottom:20px}" +
+               ".summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px}" +
+               ".summary-card{background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 5px rgba(0,0,0,0.1);text-align:center}" +
+               ".card-title{font-size:14px;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}" +
+               ".card-value{font-size:28px;font-weight:bold;color:#333}" +
+               ".card-value.pass{color:#4CAF50}" +
+               ".section{padding:30px;border-bottom:1px solid #eee}" +
+               ".section h2{color:#333;font-size:22px;margin-top:0;margin-bottom:20px;border-left:4px solid #667eea;padding-left:15px}" +
+               ".stats-table{width:100%;border-collapse:collapse;margin-top:15px}" +
+               ".stats-table th{background:#f8f9fa;padding:12px;text-align:left;font-weight:600;color:#495057;border-bottom:2px solid #dee2e6}" +
+               ".stats-table td{padding:12px;border-bottom:1px solid #dee2e6}" +
+               ".pass-row td:first-child{font-weight:600;color:#4CAF50}" +
+               ".fail-row td:first-child{font-weight:600;color:#f44336}" +
+               ".skip-row td:first-child{font-weight:600;color:#ff9800}" +
+               ".total-row{background:#f8f9fa;font-weight:bold}" +
+               ".chart-center{text-align:center;padding:20px}" +
+               ".failure-table{width:100%;border-collapse:collapse;margin-top:15px;font-size:14px}" +
+               ".failure-table th{background:#ffebee;padding:12px;text-align:left;font-weight:600;color:#c62828;border-bottom:2px solid #ef5350}" +
+               ".failure-table td{padding:12px;border-bottom:1px solid #ffcdd2}" +
+               ".failure-reason{font-family:'Courier New',monospace;font-size:12px;color:#666;word-wrap:break-word}" +
+               ".status-badge{display:inline-block;padding:4px 12px;border-radius:12px;font-size:12px;font-weight:600}" +
+               ".status-failed{background:#ffebee;color:#c62828}" +
+               ".status-error{background:#fff3e0;color:#e65100}" +
+               ".footer{background:#37474f;color:#fff;padding:30px;text-align:center}" +
+               ".footer p{margin:5px 0;opacity:0.8}" +
+               "@media only screen and (max-width:600px){.summary-grid{grid-template-columns:1fr}}";
+    }
+
+    private void sendEmailWithAttachments(String htmlContent, String pieChartPath) throws MessagingException {
+        Properties props = new Properties();
+        props.put("mail.smtp.auth", "true");
+        props.put("mail.smtp.starttls.enable", "true");
+        props.put("mail.smtp.host", SMTP_HOST);
+        props.put("mail.smtp.port", SMTP_PORT);
+        props.put("mail.smtp.ssl.trust", SMTP_HOST);
+        
+        Session session = Session.getInstance(props, new Authenticator() {
+            @Override
+            protected PasswordAuthentication getPasswordAuthentication() {
+                return new PasswordAuthentication(SMTP_USERNAME, SMTP_PASSWORD);
+            }
+        });
+        
+        try {
+            Message message = new MimeMessage(session);
+            message.setFrom(new InternetAddress(FROM_EMAIL, FROM_NAME));
+            
+            // Add TO recipients
+            InternetAddress[] toAddresses = new InternetAddress[TO_EMAILS.length];
+            for (int i = 0; i < TO_EMAILS.length; i++) {
+                toAddresses[i] = new InternetAddress(TO_EMAILS[i]);
+            }
+            message.setRecipients(Message.RecipientType.TO, toAddresses);
+            
+            // Add CC if configured
+            if (CC_EMAILS.length > 0) {
+                InternetAddress[] ccAddresses = new InternetAddress[CC_EMAILS.length];
+                for (int i = 0; i < CC_EMAILS.length; i++) {
+                    ccAddresses[i] = new InternetAddress(CC_EMAILS[i]);
+                }
+                message.setRecipients(Message.RecipientType.CC, ccAddresses);
+            }
+            
+            // Subject
+            String status = testResults.failedCount == 0 ? "✅ PASSED" : "❌ FAILED";
+            String subject = String.format("%s - %s | %s | Pass Rate: %.1f%%",
+                REPORT_TITLE, testResults.suiteName, status, testResults.passPercentage);
+            message.setSubject(subject);
+            
+            // Create multipart message
+            MimeMultipart multipart = new MimeMultipart("mixed");
+            
+            // HTML body with embedded chart
+            MimeMultipart htmlMultipart = new MimeMultipart("related");
+            
+            MimeBodyPart htmlPart = new MimeBodyPart();
+            htmlPart.setContent(htmlContent, "text/html; charset=utf-8");
+            htmlMultipart.addBodyPart(htmlPart);
+            
+            // Embed pie chart
+            MimeBodyPart chartPart = new MimeBodyPart();
+            DataSource chartSource = new FileDataSource(pieChartPath);
+            chartPart.setDataHandler(new DataHandler(chartSource));
+            chartPart.setHeader("Content-ID", "<pie_chart>");
+            chartPart.setDisposition(MimeBodyPart.INLINE);
+            htmlMultipart.addBodyPart(chartPart);
+            
+            MimeBodyPart htmlWrapper = new MimeBodyPart();
+            htmlWrapper.setContent(htmlMultipart);
+            multipart.addBodyPart(htmlWrapper);
+            
+            // Attach HTML report if specified
+            if (htmlReportPath != null) {
+                MimeBodyPart attachmentPart = new MimeBodyPart();
+                DataSource source = new FileDataSource(htmlReportPath);
+                attachmentPart.setDataHandler(new DataHandler(source));
+                attachmentPart.setFileName(new File(htmlReportPath).getName());
+                multipart.addBodyPart(attachmentPart);
+                System.out.println("   ✓ HTML report attached: " + new File(htmlReportPath).getName());
+            }
+            
+            message.setContent(multipart);
+            message.setSentDate(new Date());
+            
+            Transport.send(message);
+            
+            System.out.println("📧 Email sent to:");
+            for (String email : TO_EMAILS) {
+                System.out.println("   ✓ " + email);
+            }
+            
+        } catch (Exception e) {
+            throw new MessagingException("Failed to send email: " + e.getMessage(), e);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //                          UTILITY METHODS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private String formatDuration(long millis) {
+        long seconds = millis / 1000;
+        long minutes = seconds / 60;
+        long hours = minutes / 60;
+        
+        if (hours > 0) {
+            return String.format("%dh %dm %ds", hours, minutes % 60, seconds % 60);
+        } else if (minutes > 0) {
+            return String.format("%dm %ds", minutes, seconds % 60);
+        } else {
+            return String.format("%ds", seconds);
+        }
+    }
+
+    private String formatTimestamp(Date date) {
+        SimpleDateFormat sdf = new SimpleDateFormat("EEEE, MMMM dd, yyyy 'at' hh:mm a");
+        return sdf.format(date);
+    }
+
+    private String escapeHtml(String text) {
+        if (text == null) return "";
+        return text.replace("&", "&amp;")
+                   .replace("<", "&lt;")
+                   .replace(">", "&gt;")
+                   .replace("\"", "&quot;")
+                   .replace("'", "&#x27;");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //                          DATA CLASSES
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private static class CustomTestResults {
+        String suiteName = "Test Suite";
+        int totalCount = 0;
+        int passedCount = 0;
+        int failedCount = 0;
+        int skippedCount = 0;
+        double passPercentage = 0.0;
+        long totalDuration = 0;
+        Date timestamp = new Date();
+        List<FailedTestDetail> failedTests = new ArrayList<>();
+    }
+
+    /**
+     * Failed Test Detail Class
+     * Simple structure to hold failed test information
+     */
+    public static class FailedTestDetail {
+        private String testName;
+        private String testStatus;
+        private String failureReason;
+        
+        public FailedTestDetail(String testName, String testStatus, String failureReason) {
+            this.testName = testName;
+            this.testStatus = testStatus;
+            this.failureReason = failureReason;
+        }
+        
+        public String getTestName() { return testName; }
+        public String getTestStatus() { return testStatus; }
+        public String getFailureReason() { return failureReason; }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //                    STANDALONE TESTING - MAIN METHOD
+    // ═══════════════════════════════════════════════════════════════════════
+
+    public static void main(String[] args) {
+        String separator = "================================================================================";
+        System.out.println("\n" + separator);
+        System.out.println("🧪 EMAIL REPORTER - STANDALONE TEST MODE");
+        System.out.println(separator + "\n");
+        
+        try {
+            EmailReporter reporter = new EmailReporter();
+            
+            // Set test counts
+            reporter.setTestCounts(45, 3, 2);
+            
+            // Set suite info
+            reporter.setSuiteInfo("Sample Test Suite", 2547000); // 42 min 27 sec
+            
+            // Add failed tests
+            reporter.addFailedTest("testLoginWithInvalidCredentials", "FAILED", 
+                "AssertionError: Expected error message 'Invalid credentials' was not displayed");
+            
+            reporter.addFailedTest("testUserRegistration", "FAILED",
+                "NoSuchElementException: Element not found: xpath=//button[@id='submit']");
+            
+            reporter.addFailedTest("testDatabaseConnection", "ERROR",
+                "SQLException: Connection timeout after 30 seconds");
+            
+            // Optional: Attach HTML report (uncomment and update path)
+            // reporter.attachHtmlReport("test-output/extent-report.html");
+            
+            // Send report
+            reporter.sendReport();
+            
+            System.out.println("\n" + separator);
+            System.out.println("✅ SUCCESS! Test email sent successfully!");
+            System.out.println(separator);
+            System.out.println("\n📧 Check your inbox at: " + String.join(", ", TO_EMAILS));
+            System.out.println("💡 Don't forget to check the spam/junk folder!\n");
+            
+        } catch (Exception e) {
+            System.err.println("\n❌ ERROR: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+}
